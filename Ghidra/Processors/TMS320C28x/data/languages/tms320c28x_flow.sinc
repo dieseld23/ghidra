@@ -1,0 +1,169 @@
+# C28x control flow: branches, calls, returns.
+# Included by tms320c28x.sinc. Encodings verified against ch6_instruction_detail.txt.
+#
+# Highest-priority family after MOV: without branch/call/return the linear
+# disassembler dead-ends, so implementing these is what lifts real coverage and
+# connects functions (essential for following CAN ISR / setup code).
+#
+# PC is word-addressed; branch targets are PC-relative in words. `inst_next` is the
+# address of the following instruction; `inst_start` the current one.
+
+# =============================================================================
+# COND condition codes (4-bit, SPRU430F B-instruction table). The CC subtable
+# exports a 1-byte boolean = "branch taken". Flags live in ST0 (@define'd in the
+# .slaspec): $(Z) $(N) $(C) $(V) $(TC).
+# =============================================================================
+CC: "NEQ"   is cond4=0x0 { local c:1 = ($(Z) == 0);              export c; }
+CC: "EQ"    is cond4=0x1 { local c:1 = ($(Z) != 0);              export c; }
+CC: "GT"    is cond4=0x2 { local c:1 = (($(Z)==0) && ($(N)==0)); export c; }
+CC: "GEQ"   is cond4=0x3 { local c:1 = ($(N) == 0);              export c; }
+CC: "LT"    is cond4=0x4 { local c:1 = ($(N) != 0);              export c; }
+CC: "LEQ"   is cond4=0x5 { local c:1 = (($(Z)!=0) || ($(N)!=0)); export c; }
+CC: "HI"    is cond4=0x6 { local c:1 = (($(C)!=0) && ($(Z)==0)); export c; }
+CC: "HIS"   is cond4=0x7 { local c:1 = ($(C) != 0);              export c; }
+CC: "LO"    is cond4=0x8 { local c:1 = ($(C) == 0);              export c; }
+CC: "LOS"   is cond4=0x9 { local c:1 = (($(C)==0) || ($(Z)!=0)); export c; }
+CC: "NOV"   is cond4=0xa { local c:1 = ($(V) == 0);              export c; }
+CC: "OV"    is cond4=0xb { local c:1 = ($(V) != 0);              export c; }
+CC: "NTC"   is cond4=0xc { local c:1 = ($(TC) == 0);             export c; }
+CC: "TC"    is cond4=0xd { local c:1 = ($(TC) != 0);             export c; }
+CC: "NBIO"  is cond4=0xe { local c:1 = 0:1;                      export c; } # BIO not modeled
+CC: "UNC"   is cond4=0xf { local c:1 = 1:1;                      export c; } # unconditional
+
+# Parallel condition subtable for SB, where COND occupies bits 8..11 (cond4hi).
+CC8: "NEQ"  is cond4hi=0x0 { local c:1 = ($(Z) == 0);              export c; }
+CC8: "EQ"   is cond4hi=0x1 { local c:1 = ($(Z) != 0);              export c; }
+CC8: "GT"   is cond4hi=0x2 { local c:1 = (($(Z)==0) && ($(N)==0)); export c; }
+CC8: "GEQ"  is cond4hi=0x3 { local c:1 = ($(N) == 0);              export c; }
+CC8: "LT"   is cond4hi=0x4 { local c:1 = ($(N) != 0);              export c; }
+CC8: "LEQ"  is cond4hi=0x5 { local c:1 = (($(Z)!=0) || ($(N)!=0)); export c; }
+CC8: "HI"   is cond4hi=0x6 { local c:1 = (($(C)!=0) && ($(Z)==0)); export c; }
+CC8: "HIS"  is cond4hi=0x7 { local c:1 = ($(C) != 0);              export c; }
+CC8: "LO"   is cond4hi=0x8 { local c:1 = ($(C) == 0);              export c; }
+CC8: "LOS"  is cond4hi=0x9 { local c:1 = (($(C)==0) || ($(Z)!=0)); export c; }
+CC8: "NOV"  is cond4hi=0xa { local c:1 = ($(V) == 0);              export c; }
+CC8: "OV"   is cond4hi=0xb { local c:1 = ($(V) != 0);              export c; }
+CC8: "NTC"  is cond4hi=0xc { local c:1 = ($(TC) == 0);             export c; }
+CC8: "TC"   is cond4hi=0xd { local c:1 = ($(TC) != 0);             export c; }
+CC8: "NBIO" is cond4hi=0xe { local c:1 = 0:1;                      export c; }
+CC8: "UNC"  is cond4hi=0xf { local c:1 = 1:1;                      export c; }
+
+# =============================================================================
+# Branch targets
+# =============================================================================
+# PC-relative branch targets. The destination is a CODE address = address-of-this-
+# instruction + signed offset (in words). Computed in the disassembly action and
+# exported as a constant address via the special `*[ram]` form so goto/call can
+# use it and Ghidra shows/follows the absolute target.
+rel16dest: reloc  is simm16  [ reloc = inst_start + simm16; ] { export *[ram]:4 reloc; }
+rel8dest:  reloc  is simm8   [ reloc = inst_start + simm8;  ] { export *[ram]:4 reloc; }
+
+# ABSOLUTE 22-bit call/branch targets (LCR/LC/FFC/LB #22bit). word1 low 6 bits = addr[21:16],
+# word2 (imm16) = addr[15:0]. Like rel16dest, the destination subtable EXPORTs a ram varnode at the
+# constant address so `call`/`goto` records a real CALL/JUMP reference (a `call [local_varnode]` is a
+# computed branch and Ghidra logs NO xref → empty call graph).
+#
+# CRITICAL pattern-size rule learned the hard way: the address spans two 16-bit tokens (loc_off6 in
+# word1, imm16 in word2), so the subtable is intrinsically 2 words. A subtable referenced by `&` must
+# equal the parent's word-length; a parent matching only the opcode bits is 1 word → SLEIGH errors
+# "Mismatched pattern sizes -- 2 vs 1". Referencing it by `;` makes the subtable START at word2 (the
+# regression: every LCR mis-parsed across 3 words, decoding garbage targets + cascading halt_baddata).
+# The only correct form: the DESTINATION SUBTABLE matches the FULL 2-word instruction including the
+# opcode discriminator, and the parent constructor just references it (parent size == subtable size).
+# Hence one subtable per opcode (the discriminator bits differ). The *XARn indirect forms below stay
+# `call [reg]` — those are genuinely computed.
+lcrdest: reloc  is op_hi8=0x76 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc_off6 << 16) | imm16; ] { export *[ram]:4 reloc; }
+ffcdest: reloc  is op_hi8=0x00 & op_lo_76=0b11 & loc_off6 ; imm16  [ reloc = (loc_off6 << 16) | imm16; ] { export *[ram]:4 reloc; }
+
+# =============================================================================
+# Conditional branches
+# =============================================================================
+# B 16bitOffset,COND   1111 1111 1110 COND : CCCC CCCC CCCC CCCC
+:B rel16dest,CC  is op_hi8=0xFF & op_lo_hi4=0b1110 & cond4 & CC; simm16 & rel16dest {
+    if (CC) goto rel16dest;
+}
+
+# SB 8bitOffset,COND   0110 COND CCCC CCCC   (single word, 8-bit signed offset).
+# COND is in bits 8..11 here, so use the parallel CC8 subtable keyed on cond4hi.
+:SB rel8dest,CC8  is sb_grp=0b0110 & cond4hi & CC8 & rel8dest & simm8 {
+    if (CC8) goto rel8dest;
+}
+
+# UNCONDITIONAL branch forms — these MUST be a plain `goto`, not `if(UNC)goto`. The UNC row
+# of the CC/CC8 subtable exports a const-true guard, which SLEIGH compiles to a CBRANCH that
+# KEEPS a (dead) fall-through edge — the decompiler then prunes the fall-through-only blocks as
+# unreachable. A dedicated cond4=0xf / cond4hi=0xf constructor (more specific, so SLEIGH picks
+# it over the generic CC/CC8 form) emits a real BRANCH with no fall-through.
+:B  rel16dest,"UNC" is op_hi8=0xFF & op_lo_hi4=0b1110 & cond4=0xf ; simm16 & rel16dest { goto rel16dest; }
+:SB rel8dest,"UNC"  is sb_grp=0b0110 & cond4hi=0xf & rel8dest & simm8 { goto rel8dest; }
+
+# SBF 8bitOffset,EQ/NEQ/TC/NTC   1110 11SS CCCC CCCC  (Short Branch Fast, single word;
+# 8-bit signed word offset in the low byte). Four fixed condition encodings — EQ=0xEC
+# NEQ=0xED TC=0xEE NTC=0xEF. dis2000-confirmed (op_hi8=0xEE present in the DIR image).
+:SBF rel8dest,"EQ"   is op_hi8=0xEC & rel8dest & simm8  { if ($(Z) != 0)  goto rel8dest; }
+:SBF rel8dest,"NEQ"  is op_hi8=0xED & rel8dest & simm8  { if ($(Z) == 0)  goto rel8dest; }
+:SBF rel8dest,"TC"   is op_hi8=0xEE & rel8dest & simm8  { if ($(TC) != 0) goto rel8dest; }
+:SBF rel8dest,"NTC"  is op_hi8=0xEF & rel8dest & simm8  { if ($(TC) == 0) goto rel8dest; }
+
+# BANZ 16bitOffset,ARn--   0000 0000 0000 1nnn : CCCC CCCC CCCC CCCC
+# Branch if AR(n) != 0, then post-decrement AR(n).  Bits 7..3 of low byte = 00001.
+:BANZ rel16dest,banz_n^"--"  is op_hi8=0x00 & op_lo_hi5=0b00001 & banz_n; simm16 & rel16dest {
+    local taken:1 = (banz_n != 0);
+    banz_n = banz_n - 1;
+    if (taken) goto rel16dest;
+}
+
+# BF 16bitOffset,COND   0101 0110 1100 COND : CCCC CCCC CCCC CCCC  (branch fast,
+# PC-relative like B). word1 = 0x56C0 | COND; word2 = signed offset. The COND lives
+# in the low nibble of word1 (cond4); the rel target uses word2 (simm16).
+:BF rel16dest,CC  is op_hi8=0x56 & loc_hi4=0b1100 & cond4 & CC; simm16 & rel16dest {
+    if (CC) goto rel16dest;
+}
+
+# =============================================================================
+# Long / indirect calls and returns
+# =============================================================================
+# LCR #22bit          0111 0110 01CC CCCC : CCCC CCCC CCCC CCCC  (call using RPC)
+# The target is an ABSOLUTE 22-bit address: word1 low 6 bits = addr[21:16],
+# word2 = addr[15:0]. (NOT pc-relative — the earlier rel16dest version computed
+# inst_start+simm16, so every LCR pointed back at itself; in unlinked .objs the
+# field is a 0 reloc placeholder, which made it look like a self-call.)
+:LCR lcrdest  is lcrdest {
+    RPC = inst_next;
+    call lcrdest;
+}
+
+# LCR *XARn           0011 1110 0110 0RRR  (indirect call using RPC)
+:LCR "*"loc_areg  is op_hi8=0x3E & op_lo_35=0b01100 & loc_areg {
+    RPC = inst_next;
+    call [loc_areg];
+}
+
+# FFC XAR7,#22bit     0000 0000 11CC CCCC : CCCC CCCC CCCC CCCC  (fast call; return
+# PC saved in XAR7, ABSOLUTE 22-bit target). word1 low 6 bits = addr[21:16].
+:FFC "XAR7,"ffcdest  is ffcdest {
+    XAR7 = inst_next;
+    call ffcdest;
+}
+
+# LRETR               0000 0000 0000 0110   (long return using RPC)
+:LRETR  is op16=0x0006 {
+    return [RPC];
+}
+
+# LRET                0111 0110 0001 0100
+:LRET   is op16=0x7614 {
+    # 22-bit return address was pushed as two words; pop the 32-bit value off SP.
+    SP = SP - 2;
+    local addr:4 = zext(SP);
+    local t:4 = *[ram]:4 addr;
+    return [t];
+}
+
+# IRET                0111 0110 0000 0010   (interrupt return)
+:IRET   is op16=0x7602 {
+    SP = SP - 2;
+    local addr:4 = zext(SP);
+    local t:4 = *[ram]:4 addr;
+    return [t];
+}

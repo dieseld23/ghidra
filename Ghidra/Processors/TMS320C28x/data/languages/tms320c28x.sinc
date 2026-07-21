@@ -1,0 +1,172 @@
+# TMS320C28x instruction constructors.
+# Included by tms320c28x.slaspec.
+#
+# SKELETON STAGE: only a handful of fixed-opcode instructions are defined here,
+# enough to prove the toolchain compiles and disassembles. The shared loc16/loc32
+# addressing sub-tables and the bulk of the ISA follow in later stages.
+#
+# Encodings verified against SPRU430F (docs/c28x/ch6_instruction_detail.txt).
+# Instructions are fetched as 16-bit words, low byte first (little-endian).
+
+# --- 16-bit instruction word token --------------------------------------------
+# All sub-fields of the opcode word live here, including the loc-field decode bits
+# (loc_* ), which overlay the low byte. Defining them on ONE token keeps byte
+# consumption correct (the loc field shares the instruction word, not extra bytes).
+define token instr16 (16)
+    op16    = (0,15)        # whole 16-bit opcode
+    op_hi8  = (8,15)        # high byte (opcode group)
+    op_hi7  = (9,15)        # top 7 bits (group when bit 8 is an operand 'A' bit)
+    op_hi5  = (11,15)       # top 5 bits (group when bits 8..10 are an AR selector)
+    op_lo8  = (0,7)         # low byte (often the loc16 field)
+    # loc-field sub-fields (low byte, bits 0..7):
+    loc_b7    = (7,7)
+    loc_b76   = (6,7)
+    loc_mode5 = (3,7)       # mode selector for the 1 0 xxx group
+    loc_areg  = (0,2)       # XARn selector (AAA) -> attached to XAR0..XAR7
+    loc_areg16= (0,2)       # same bits, attached to AR0..AR7 (16-bit @ARn mode)
+    loc_arp   = (0,2)       # ARP number 0..7 for *,ARPn (plain, NOT attached to a reg)
+    loc_off6  = (0,5)       # 6-bit offset (@6bit, *-SP[6bit])
+    loc_imm3  = (3,5)       # 3-bit index III in *+XARn[3bit] (1 1 III AAA) — NOT bits
+                            # 0-2 (those are the XARn selector AAA); was a real bug:
+                            # the index always mis-printed as the register number.
+    loc_full8 = (0,7)       # whole loc field (fixed encodings)
+    # operand sub-fields that share the opcode word:
+    ax_bit    = (8,8)       # 0 = AL, 1 = AH  (the 'A' bit in 1001 xxxA ....)
+    arsel3    = (8,10)      # 3-bit AR selector (the 'nnn' in 0111 1nnn ....) -> AR view
+    arsel3x   = (8,10)      # same 3 bits attached to XARn (32-bit) for MOVZ zero-extend
+    imm8      = (0,7)       # 8-bit immediate (CCCC CCCC, low byte)
+    simm8     = (0,7) signed # 8-bit signed offset (SB)
+    cond4     = (0,3)       # 4-bit condition code (COND), low nibble (B/BF)
+    cond4hi   = (8,11)      # COND in bits 8..11 (SB: 0110 COND CCCC CCCC)
+    sb_grp    = (12,15)     # top nibble = 0110 for SB
+    banz_n    = (0,2)       # ARn selector for BANZ (0000 0000 0000 1nnn)
+    op_lo_hi5 = (3,7)       # bits 3..7 of low byte (BANZ: 00001 nnn -> this=00001)
+    op_lo_76  = (6,7)       # bits 6..7 of the low byte (LCR #22bit group selector)
+    op_lo_35  = (3,7)       # bits 3..7 of the low byte (LCR *XARn selector)
+    op_lo_hi4 = (4,7)       # bits 4..7 of the low byte (B: 1110 COND -> this=1110)
+    op_hi_4   = (12,15)     # top nibble (TBIT: 0100 BBBB ....)
+    tbit_b    = (8,11)      # 4-bit bit index (TBIT)
+    op_hi_6   = (10,15)     # top 6 bits (MOVZ DP: 1011 10CC ....)
+    dp10      = (0,9)       # 10-bit DP immediate (MOVZ DP,#10bit)
+    fimm_hi   = (4,7)       # MOVIZ/MOVXI: bits 7..4 (=0000)
+    fimm_z    = (3,3)       # MOVIZ(0)/MOVXI(1) selector bit
+    fimm_reg  = (0,2)       # FP register III for MOVIZ/MOVXI -> attached to R0H..R7H
+    fimm_lo6  = (0,5)       # #16FHi immediate low 6 bits (LSW: 1110 1000 ssII IIII) ADD/SUB/MPY
+    fimm_lo3  = (0,2)       # #16FHi immediate low 3 bits (LSW: 1110 1000 mmmm 0III) CMP/MAX/MIN
+    op_lo7    = (0,6)       # low 7 bits (sub-opcode where bit0 is NOT an operand)
+    op_lo71   = (1,7)       # bits 1..7 (ASR/LSR/LSL AX,T: 1111 1111 0110 0ssA, A=bit0)
+    ax_bit0   = (0,0)       # AX selector in bit 0 (the 'A' in ...0110 0ssA)
+    sp7       = (0,6)       # 7-bit SP immediate (ADDB SP,#7bit)
+    xarn_hi3  = (8,10)      # XARn selector nnn (SUBB XARn,#: 1101 1nnn 1CCC CCCC)
+    fcndf     = (0,3)       # FPU CNDF condition (MOV32 RaH,RbH,CNDF etc.)
+    loc_hi4   = (4,7)       # high nibble of the low byte (MOV32 RaH,RbH: ...1100 CNDF)
+    shft4     = (0,3)       # 4-bit shift count SHFT (AX,#1..16: SHFT, 0->16)
+    ax_bit4   = (4,4)       # AX selector in bit 4 (the 'A' in 1111 1111 ssAS SHFT)
+    op_lo765  = (5,7)       # bits 5..7 of low byte (AX,#imm shift selector sss)
+    p_rf      = (1,3)       # fff  RfH for parallel MPYF32||MOV32 (LSW: 0000 fffe)
+    shft_hi4  = (8,11)      # SHFT in word2 of MOV ACC,loc16<<#1..15 (0000 SHFT LLLLLLLL)
+    imm8_hi   = (8,15)      # high byte of word2 (MOVB loc16,#8bit,COND: CCCC CCCC LLLLLLLL)
+    p_re_hi   = (0,0)       # e    high bit of ReH for that parallel form
+    rptb_sel  = (7,7)       # RPTB form select (LSW 1011 0101 Rbbb bbbb): 0=loc16, 1=#RC
+    rptb_rsz  = (0,6)       # RPTB block size RSIZE (low 7 bits of the LSW)
+    norm_pm   = (3,3)       # NORM ACC,XARn: bit3 selects ++ (1) vs -- (0)
+    setflg_m6 = (0,5)       # SETFLG FPU flag-mask low 6 bits (LSW 1110 0110 00FF FFFF)
+    lo_b76    = (6,7)        # top 2 bits of the low byte (SETFLG selector: 00)
+;
+
+# --- trailing 16-bit immediate / extension word -------------------------------
+define token imm16w (16)
+    imm16   = (0,15)
+    simm16  = (0,15) signed
+;
+
+# --- helper macros: set NZ for a 16-bit / 32-bit result ----------------------
+# Defined here (before all instruction includes) so every .sinc can use them — mov.sinc
+# is included before alu.sinc, so these can't live in alu.sinc.
+macro setNZ16(r) {
+    $(N) = (r s< 0);
+    $(Z) = (r == 0);
+}
+macro setNZ32(r) {
+    $(N) = (r s< 0);
+    $(Z) = (r == 0);
+}
+
+# --- shared loc16 / loc32 addressing sub-tables (Table 5-1) --------------------
+# The loc field is the low byte of the opcode word; the locfield token in the
+# addr include overlays op_lo8's bits. Included before the instructions that use it.
+@include "tms320c28x_addr.sinc"
+
+# =============================================================================
+# Fixed-opcode, no-operand instructions (verified single-word encodings).
+# =============================================================================
+
+:ABORTI         is op16=0x0001  { }                 # Abort interrupt (skeleton: no semantics yet)
+
+:EALLOW         is op16=0x7622  { $(EALLOWF) = 1; } # Enable write access to protected space
+:EDIS           is op16=0x761A  { $(EALLOWF) = 0; } # Disable write access to protected space
+:IDLE           is op16=0x7621  { }                 # Put processor in idle mode
+:ESTOP0         is op16=0x7625  { }                 # Emulation stop 0
+# Stack-pointer align/unalign (common in prologues/epilogues). ASP: if SP odd, SP++ and
+# set SPA; NASP: if SPA, SP-- and clear SPA. SPA = ST1[4]. (0x761b / 0x7617.)
+:ASP            is op16=0x761B  { if ((SP & 1) == 0) goto <even>; SP = SP + 1; $(SPA) = 1; goto inst_next; <even> $(SPA) = 0; }
+:NASP           is op16=0x7617  { if ($(SPA) == 0) goto inst_next; SP = SP - 1; $(SPA) = 0; }
+:ESTOP1         is op16=0x7624  { }                 # Emulation stop 1 (halts only when emulator connected)
+
+# IER/IFR immediate forms (2-word: opcode word + imm16).  SPRU430F encodings:
+# OR  IER,#16bit  0111 0110 0010 0011 = 0x7623
+# OR  IFR,#16bit  0111 0110 0010 0111 = 0x7627
+# AND IER,#16bit  0111 0110 0010 0110 = 0x7626
+# AND IFR,#16bit  0111 0110 0010 1111 = 0x762F
+:OR  "IER", "#"imm16  is op16=0x7623 ; imm16  { IER = IER | imm16:2; }
+:OR  "IFR", "#"imm16  is op16=0x7627 ; imm16  { IFR = IFR | imm16:2; }
+:AND "IER", "#"imm16  is op16=0x7626 ; imm16  { IER = IER & imm16:2; }
+:AND "IFR", "#"imm16  is op16=0x762F ; imm16  { IFR = IFR & imm16:2; }
+
+# NOP {*ind}: 0111 0111 LLLL LLLL. The loc field optionally performs an indirect
+# address modify (e.g. NOP *XAR0++). Plain NOP is the loc=0 case. One constructor
+# covers both: loc=0 renders "@0" (still mnemonic NOP); modify forms show the loc.
+:NOP            is op_hi8=0x77 & op_lo8=0x00  { }              # plain No-operation
+:NOP loc16      is op_hi8=0x77 & op_lo8!=0x00 & loc16  { }     # NOP with indirect modify
+
+# =============================================================================
+# Register-display operands.  A bare register name cannot sit in an instruction's
+# operand position (SLEIGH treats it as an undefined operand). The idiom (cf. 8051
+# `Areg`) is a zero-width subtable that prints the register name and exports the
+# register varnode, matched with `epsilon` (no pattern bits). Reused everywhere.
+# =============================================================================
+ACCreg: "ACC" is epsilon { export ACC; }
+IERreg: "IER" is epsilon { export IER; }
+Preg:   "P"   is epsilon { export P;   }
+XTreg:  "XT"  is epsilon { export XT;  }
+Treg:   "T"   is epsilon { export T;   }
+PHreg:  "PH"  is epsilon { export PH;  }
+PLreg:  "PL"  is epsilon { export PL;  }
+
+# AX register select: the 'A' bit (ax_bit) picks AL (0) or AH (1).
+AX: "AL"  is ax_bit=0 { export AL; }
+AX: "AH"  is ax_bit=1 { export AH; }
+
+# AX select where the 'A' bit lives in bit 0 of the word (e.g. ASR/LSR/LSL AX,T).
+AXb0: "AL"  is ax_bit0=0 { export AL; }
+AXb0: "AH"  is ax_bit0=1 { export AH; }
+
+# AX select where the 'A' bit lives in bit 4 (e.g. ASR/LSR/LSL AX,#1..16).
+AXb4: "AL"  is ax_bit4=0 { export AL; }
+AXb4: "AH"  is ax_bit4=1 { export AH; }
+
+# SHFT count for AX,#1..16.  The field encodes shift-1 (so SHFT=0 -> shift of 16);
+# disasm action computes the displayed/used count.
+shcount: cnt  is shft4  [ cnt = shft4 + 1; ]  { export *[const]:1 cnt; }
+
+# =============================================================================
+# Instruction families (encodings verified against ch6_instruction_detail.txt).
+# =============================================================================
+@include "tms320c28x_mov.sinc"
+@include "tms320c28x_flow.sinc"
+@include "tms320c28x_alu.sinc"
+@include "tms320c28x_mac.sinc"
+@include "tms320c28x_fpu.sinc"
+@include "tms320c28x_vcu.sinc"
+@include "tms320c28x_more.sinc"
+@include "tms320c28x_ext56.sinc"
