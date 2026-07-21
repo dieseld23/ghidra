@@ -4226,21 +4226,29 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
   }
   if (!vn->isWritten()) return (AddrSpace *)0;
   op = vn->getDef();
+  if (op->code() == CPUI_INT_ZEXT) {
+    // A spacebase register narrower than the address space (e.g. TMS320C28x: 16-bit SP
+    // into a 32-bit space) is zero-extended to form the pointer.  The extension preserves
+    // the (non-negative) stack offset, so peel it.  This is safe because the recursion
+    // still bottoms out at correctSpacebase(), which requires a genuine spacebase register.
+    return vnSpacebase(glb,op->getIn(0),val,spc);
+  }
   if (op->code() != CPUI_INT_ADD) return (AddrSpace *)0;
   vn1 = op->getIn(0);
   vn2 = op->getIn(1);
-  retspace = correctSpacebase(glb,vn1,spc);
+  uintb subval;
+  retspace = vnSpacebase(glb,vn1,subval,spc);
   if (retspace != (AddrSpace *)0) {
     if (vn2->isConstant()) {
-      val = vn2->getOffset();
+      val = subval + vn2->getOffset();
       return retspace;
     }
     return (AddrSpace *)0;
   }
-  retspace = correctSpacebase(glb,vn2,spc);
+  retspace = vnSpacebase(glb,vn2,subval,spc);
   if (retspace != (AddrSpace *)0) {
     if (vn1->isConstant()) {
-      val = vn1->getOffset();
+      val = subval + vn1->getOffset();
       return retspace;
     }
   }
