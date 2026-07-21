@@ -1,9 +1,8 @@
 name: build
 
-# Builds Ghidra's native components (incl. the decompiler) on a Linux runner,
-# so you can compile/test the decompiler change without a local Windows C++ setup.
-# Versions come from Ghidra/application.properties (this tree = 12.2 DEV):
-#   application.java.min=25   application.gradle.min=9.1
+# Builds Ghidra's native decompiler on Linux + Windows so you can grab a drop-in
+# binary without a local C++ setup. Versions come from Ghidra/application.properties
+# (this tree = 12.2 DEV): application.java.min=25, application.gradle.min=9.1
 on:
   push:
     branches: ["**"]        # any branch push (e.g. fold-zext-spacebase)
@@ -11,8 +10,12 @@ on:
 
 jobs:
   natives:
-    name: Build native decompiler
-    runs-on: ubuntu-latest
+    name: Build decompiler (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false                       # one OS failing must not cancel the other
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -25,68 +28,32 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "9.5.1"    # must be >= application.gradle.min (9.1)
+          gradle-version: "9.5.1"            # must be >= application.gradle.min (9.1)
 
-      - name: Install native toolchain
-        run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
-
-      - name: Fetch non-Maven dependencies
-        run: gradle -I gradle/support/fetchDependencies.gradle
+      # Linux needs g++/make; Windows uses MSVC (auto-discovered from VS 2022 on the runner).
+      # No bison/flex on either: the generated parser .cc files are checked into source
+      # control (generateParsers is a separate manual task), so buildNatives just compiles.
+      - name: Install Linux native toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y g++ make
 
       - name: Build native components (compiles the decompiler)
         run: gradle buildNatives
         env:
-          LC_MESSAGES: en_US.UTF-8    # DevGuide: needed for native-toolchain discovery on some locales
-
-      - name: Locate built decompiler
-        run: |
-          echo "Native binaries produced:"
-          find . -path '*/os/*' -type f \( -name 'decompile*' -o -name 'sleigh*' \) -printf '%p  (%s bytes)\n' || true
-
-      - name: Upload decompiler binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: decompiler-linux
-          if-no-files-found: warn
-          path: |
-            Ghidra/Features/Decompiler/build/os/**/decompile*
-            Ghidra/Features/Decompiler/os/**/decompile*
-
-  natives-windows:
-    name: Build native decompiler (Windows)
-    runs-on: windows-latest      # has Visual Studio 2022 / MSVC; Gradle auto-discovers it
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up JDK 25
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "25"
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.5.1"
-
-      # No bison/flex needed: the generated parser .cc files are checked into
-      # source control (generateParsers is a separate manual task), so buildNatives
-      # just compiles them with MSVC.
-      - name: Build native components (compiles decompile.exe)
-        run: gradle buildNatives
+          LC_MESSAGES: en_US.UTF-8            # DevGuide: native-toolchain discovery on some locales
 
       - name: Locate built decompiler
         shell: bash
         run: find . -path '*/os/*' -type f -name 'decompile*' -printf '%p  (%s bytes)\n' || true
 
-      - name: Upload Windows decompiler
+      - name: Upload decompiler
         uses: actions/upload-artifact@v4
         with:
-          name: decompiler-windows
+          name: decompiler-${{ runner.os }}   # decompiler-Linux / decompiler-Windows
           if-no-files-found: warn
           path: |
-            Ghidra/Features/Decompiler/build/os/**/decompile*.exe
-            Ghidra/Features/Decompiler/os/**/decompile*.exe
+            Ghidra/Features/Decompiler/build/os/**/decompile*
+            Ghidra/Features/Decompiler/os/**/decompile*
 
   # ---------------------------------------------------------------------------
   # Full runnable Ghidra distribution (Linux). Slower (~20-30 min). Uncomment to
@@ -101,7 +68,7 @@ jobs:
   #       with: { distribution: temurin, java-version: "25" }
   #     - uses: gradle/actions/setup-gradle@v4
   #       with: { gradle-version: "9.5.1" }
-  #     - run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
+  #     - run: sudo apt-get update && sudo apt-get install -y g++ make
   #     - run: gradle -I gradle/support/fetchDependencies.gradle
   #     - run: gradle buildGhidra
   #       env: { LC_MESSAGES: en_US.UTF-8 }
