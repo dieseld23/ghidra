@@ -38,11 +38,19 @@ jobs:
         env:
           LC_MESSAGES: en_US.UTF-8    # DevGuide: needed for native-toolchain discovery on some locales
 
+      - name: Locate built decompiler
+        run: |
+          echo "Native binaries produced:"
+          find . -path '*/os/*' -type f \( -name 'decompile*' -o -name 'sleigh*' \) -printf '%p  (%s bytes)\n' || true
+
       - name: Upload decompiler binary
         uses: actions/upload-artifact@v4
         with:
           name: decompiler-linux
-          path: Ghidra/Features/Decompiler/os/**/decompile*
+          if-no-files-found: warn
+          path: |
+            Ghidra/Features/Decompiler/build/os/**/decompile*
+            Ghidra/Features/Decompiler/os/**/decompile*
 
   # ---------------------------------------------------------------------------
   # Full runnable Ghidra distribution (Linux). Slower (~20-30 min). Uncomment to
