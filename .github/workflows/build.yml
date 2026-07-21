@@ -1,0 +1,65 @@
+name: build
+
+# Builds Ghidra's native components (incl. the decompiler) on a Linux runner,
+# so you can compile/test the decompiler change without a local Windows C++ setup.
+on:
+  push:
+    branches: ["**"]        # any branch push (e.g. fold-zext-spacebase)
+  workflow_dispatch:         # manual "Run workflow" button in the Actions tab
+
+jobs:
+  natives:
+    name: Build native decompiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"      # Ghidra 12.x needs Gradle 8.5+; adjust per README.md if needed
+
+      - name: Install native toolchain
+        run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
+
+      - name: Fetch non-Maven dependencies
+        run: gradle -I gradle/support/fetchDependencies.gradle
+
+      - name: Build native components (compiles the decompiler)
+        run: gradle buildNatives
+        env:
+          LC_MESSAGES: en_US.UTF-8    # DevGuide: needed for native-toolchain discovery on some locales
+
+      - name: Upload decompiler binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiler-linux
+          path: Ghidra/Features/Decompiler/os/**/decompile*
+
+  # ---------------------------------------------------------------------------
+  # Full runnable Ghidra distribution (Linux). Slower (~20-30 min). Uncomment to
+  # get a build/dist zip containing your patched decompiler + the C28x module.
+  # ---------------------------------------------------------------------------
+  # dist:
+  #   name: Build full Ghidra distribution
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-java@v4
+  #       with: { distribution: temurin, java-version: "21" }
+  #     - uses: gradle/actions/setup-gradle@v4
+  #       with: { gradle-version: "8.9" }
+  #     - run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
+  #     - run: gradle -I gradle/support/fetchDependencies.gradle
+  #     - run: gradle buildGhidra
+  #       env: { LC_MESSAGES: en_US.UTF-8 }
+  #     - uses: actions/upload-artifact@v4
+  #       with:
+  #         name: ghidra-dist-linux
+  #         path: build/dist/*.zip
