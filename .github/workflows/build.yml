@@ -2,6 +2,8 @@ name: build
 
 # Builds Ghidra's native components (incl. the decompiler) on a Linux runner,
 # so you can compile/test the decompiler change without a local Windows C++ setup.
+# Versions come from Ghidra/application.properties (this tree = 12.2 DEV):
+#   application.java.min=25   application.gradle.min=9.1
 on:
   push:
     branches: ["**"]        # any branch push (e.g. fold-zext-spacebase)
@@ -14,16 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
+      - name: Set up JDK 25
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "25"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: "8.9"      # Ghidra 12.x needs Gradle 8.5+; adjust per README.md if needed
+          gradle-version: "9.5.1"    # must be >= application.gradle.min (9.1)
 
       - name: Install native toolchain
         run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
@@ -52,9 +54,9 @@ jobs:
   #   steps:
   #     - uses: actions/checkout@v4
   #     - uses: actions/setup-java@v4
-  #       with: { distribution: temurin, java-version: "21" }
+  #       with: { distribution: temurin, java-version: "25" }
   #     - uses: gradle/actions/setup-gradle@v4
-  #       with: { gradle-version: "8.9" }
+  #       with: { gradle-version: "9.5.1" }
   #     - run: sudo apt-get update && sudo apt-get install -y bison flex g++ make
   #     - run: gradle -I gradle/support/fetchDependencies.gradle
   #     - run: gradle buildGhidra
