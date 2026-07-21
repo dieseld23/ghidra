@@ -52,6 +52,42 @@ jobs:
             Ghidra/Features/Decompiler/build/os/**/decompile*
             Ghidra/Features/Decompiler/os/**/decompile*
 
+  natives-windows:
+    name: Build native decompiler (Windows)
+    runs-on: windows-latest      # has Visual Studio 2022 / MSVC; Gradle auto-discovers it
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.5.1"
+
+      # No bison/flex needed: the generated parser .cc files are checked into
+      # source control (generateParsers is a separate manual task), so buildNatives
+      # just compiles them with MSVC.
+      - name: Build native components (compiles decompile.exe)
+        run: gradle buildNatives
+
+      - name: Locate built decompiler
+        shell: bash
+        run: find . -path '*/os/*' -type f -name 'decompile*' -printf '%p  (%s bytes)\n' || true
+
+      - name: Upload Windows decompiler
+        uses: actions/upload-artifact@v4
+        with:
+          name: decompiler-windows
+          if-no-files-found: warn
+          path: |
+            Ghidra/Features/Decompiler/build/os/**/decompile*.exe
+            Ghidra/Features/Decompiler/os/**/decompile*.exe
+
   # ---------------------------------------------------------------------------
   # Full runnable Ghidra distribution (Linux). Slower (~20-30 min). Uncomment to
   # get a build/dist zip containing your patched decompiler + the C28x module.
