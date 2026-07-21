@@ -4228,10 +4228,16 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
   op = vn->getDef();
   if (op->code() == CPUI_INT_ZEXT) {
     // A spacebase register narrower than the address space (e.g. TMS320C28x: 16-bit SP
-    // into a 32-bit space) is zero-extended to form the pointer.  The extension preserves
-    // the (non-negative) stack offset, so peel it.  This is safe because the recursion
-    // still bottoms out at correctSpacebase(), which requires a genuine spacebase register.
-    return vnSpacebase(glb,op->getIn(0),val,spc);
+    // into a 32-bit space) is zero-extended to form the pointer.  Peel it -- but only accept
+    // a stack offset that actually fits the narrow pointer.  Otherwise this is not a plain
+    // stack access, and folding it would try to build an out-of-range (invalid) stack address.
+    retspace = vnSpacebase(glb,op->getIn(0),val,spc);
+    if (retspace != (AddrSpace *)0) {
+      uintb mask = calc_mask(op->getIn(0)->getSize());
+      if ((val & mask) != val)
+        return (AddrSpace *)0;
+    }
+    return retspace;
   }
   if (op->code() != CPUI_INT_ADD) return (AddrSpace *)0;
   vn1 = op->getIn(0);
