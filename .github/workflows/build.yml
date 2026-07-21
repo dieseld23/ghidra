@@ -37,6 +37,9 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y g++ make
 
+      - name: Fetch non-Maven dependencies      # creates dependencies/flatRepo the build requires
+        run: gradle -I gradle/support/fetchDependencies.gradle
+
       - name: Build native components (compiles the decompiler)
         run: gradle buildNatives
         env:
