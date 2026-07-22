@@ -4226,39 +4226,46 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
   }
   if (!vn->isWritten()) return (AddrSpace *)0;
   op = vn->getDef();
+
+  // A spacebase register narrower than the address space (e.g. TMS320C28x: a 16-bit SP
+  // in a 32-bit space) is zero-extended to form the pointer.  Recognize zext(spacebase)
+  // as the spacebase.  We deliberately do NOT recurse or sum offsets: the offset is only
+  // ever the single constant added below, and any zext-peeled result is range-checked, so
+  // this can never synthesize an out-of-range (invalid) stack address.
   if (op->code() == CPUI_INT_ZEXT) {
-    // A spacebase register narrower than the address space (e.g. TMS320C28x: 16-bit SP
-    // into a 32-bit space) is zero-extended to form the pointer.  Peel it -- but only accept
-    // a stack offset that actually fits the narrow pointer.  Otherwise this is not a plain
-    // stack access, and folding it would try to build an out-of-range (invalid) stack address.
-    retspace = vnSpacebase(glb,op->getIn(0),val,spc);
-    if (retspace != (AddrSpace *)0) {
-      uintb mask = calc_mask(op->getIn(0)->getSize());
-      if ((val & mask) != val)
-        return (AddrSpace *)0;
-    }
-    return retspace;
+    retspace = correctSpacebase(glb,op->getIn(0),spc);
+    if (retspace != (AddrSpace *)0) { val = 0; return retspace; }
+    return (AddrSpace *)0;
   }
+
   if (op->code() != CPUI_INT_ADD) return (AddrSpace *)0;
   vn1 = op->getIn(0);
   vn2 = op->getIn(1);
-  uintb subval;
-  retspace = vnSpacebase(glb,vn1,subval,spc);
-  if (retspace != (AddrSpace *)0) {
-    if (vn2->isConstant()) {
-      val = subval + vn2->getOffset();
-      return retspace;
-    }
-    return (AddrSpace *)0;
+
+  Varnode *basevn,*constvn;
+  if (vn2->isConstant()) { basevn = vn1; constvn = vn2; }
+  else if (vn1->isConstant()) { basevn = vn2; constvn = vn1; }
+  else return (AddrSpace *)0;
+
+  bool peeled = false;
+  int4 spbsize = 0;
+  retspace = correctSpacebase(glb,basevn,spc);
+  if (retspace == (AddrSpace *)0 && basevn->isWritten() &&
+      basevn->getDef()->code() == CPUI_INT_ZEXT) {
+    spbsize = basevn->getDef()->getIn(0)->getSize();
+    retspace = correctSpacebase(glb,basevn->getDef()->getIn(0),spc);
+    peeled = true;
   }
-  retspace = vnSpacebase(glb,vn2,subval,spc);
-  if (retspace != (AddrSpace *)0) {
-    if (vn1->isConstant()) {
-      val = subval + vn1->getOffset();
-      return retspace;
-    }
+  if (retspace == (AddrSpace *)0) return (AddrSpace *)0;
+
+  val = constvn->getOffset();
+  if (peeled) {
+    // The true stack offset must fit the narrow spacebase width (a small positive offset,
+    // or a small negative wrap).  Reject anything else rather than build a bad stack address.
+    uintb range = calc_mask(spbsize);
+    if (val > range && val < ~range) return (AddrSpace *)0;
   }
-  return (AddrSpace *)0;
+  return retspace;
 }
 
 /// \brief Check if STORE or LOAD is off of a spacebase + constant
