@@ -4226,7 +4226,7 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
   bool sawzext = false;
   int4 spbsize = 0;
   Varnode *cur = vn;
-  for(int4 i=0;i<5;++i) {
+  for(int4 i=0;i<6;++i) {
     AddrSpace *retspace = correctSpacebase(glb,cur,spc);
     if (retspace != (AddrSpace *)0) {
       if (sawzext) {
@@ -4269,6 +4269,17 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
       // casts the soft-float call-fixups put on the fcmp scratch read at [SP-2] -- which otherwise
       // stops the walk before it reaches the INT_SUB/ZEXT below.
       cur = op->getIn(0);
+    }
+    else if (oc == CPUI_PTRSUB && sawzext) {
+      // Inside a narrow-SP zext the frame-adjusted stackpointer appears as PTRSUB(SP, framesize) --
+      // Ghidra's pointer form of `SP + framesize` (e.g. PTRSUB(SP,0x30) for a 0x30-word frame).
+      // Peel it like a constant add so the walk reaches the true spacebase input; without it the
+      // soft-float scratch `zext(SP + framesize) - c` dead-ends at the PTRSUB and never folds.
+      // Gated on sawzext so targets whose PTRSUB is resolved by the normal stack machinery (no
+      // narrow-SP zext) are left completely unchanged.
+      Varnode *b = op->getIn(1);
+      if (b->isConstant()) { off += b->getOffset(); cur = op->getIn(0); }
+      else return (AddrSpace *)0;
     }
     else
       return (AddrSpace *)0;
