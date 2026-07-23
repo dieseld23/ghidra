@@ -4263,6 +4263,13 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
       if (b->isConstant()) { off -= b->getOffset(); cur = op->getIn(0); }
       else return (AddrSpace *)0;
     }
+    else if (oc == CPUI_CAST) {
+      // A pointer CAST is value-preserving, so see through it.  The LOAD/STORE address is often a
+      // CAST of the spacebase+offset expression -- e.g. `*(float *)(zext(SP) - 2)`, the (float*)
+      // casts the soft-float call-fixups put on the fcmp scratch read at [SP-2] -- which otherwise
+      // stops the walk before it reaches the INT_SUB/ZEXT below.
+      cur = op->getIn(0);
+    }
     else
       return (AddrSpace *)0;
   }
