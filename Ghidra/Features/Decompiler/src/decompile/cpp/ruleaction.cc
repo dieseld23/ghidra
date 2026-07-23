@@ -4253,6 +4253,16 @@ AddrSpace *RuleLoadVarnode::vnSpacebase(Architecture *glb,Varnode *vn,uintb &val
       else if (a->isConstant()) { off += a->getOffset(); cur = b; }
       else return (AddrSpace *)0;
     }
+    else if (oc == CPUI_INT_SUB) {
+      // `a - const` only (the subtrahend must be constant; `const - a` would negate the
+      // spacebase and can't be a stack offset).  Folds `zext(SP) - c` where the subtract sits
+      // OUTSIDE the zext -- e.g. the soft-float call-fixups that read the fcmp scratch at [SP-2] --
+      // which the INT_ADD case alone does not reach.  The two's-complement offset is caught by the
+      // same post-zext range check below, so an out-of-range value still can't be synthesized.
+      Varnode *b = op->getIn(1);
+      if (b->isConstant()) { off -= b->getOffset(); cur = op->getIn(0); }
+      else return (AddrSpace *)0;
+    }
     else
       return (AddrSpace *)0;
   }
