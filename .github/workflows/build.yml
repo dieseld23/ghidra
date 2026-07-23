@@ -40,13 +40,19 @@ jobs:
         run: gradle -I gradle/support/fetchDependencies.gradle
 
       - name: Build native components (compiles the decompiler)
-        run: gradle buildNatives
+        # --rerun-tasks + --no-build-cache: never reuse a cached/up-to-date native binary, so a
+        # ruleaction.cc change always recompiles decompile.exe (otherwise the gradle cache from
+        # setup-gradle can hand back the previous build).
+        run: gradle buildNatives --rerun-tasks --no-build-cache
         env:
           LC_MESSAGES: en_US.UTF-8            # DevGuide: native-toolchain discovery on some locales
 
       - name: Locate built decompiler
         shell: bash                            # so 'find' is GNU find on Windows too (git-bash)
-        run: find . -path '*/os/*' -type f -name 'decompile*' -printf '%p  (%s bytes)\n' || true
+        run: |
+          find . -path '*/os/*' -type f -name 'decompile*' -printf '%p  (%s bytes)\n' || true
+          echo "--- sha256 (compare across runs to confirm the binary actually changed) ---"
+          find . -path '*/os/*' -type f -name 'decompile*' -exec sha256sum {} \; || true
 
       - name: Upload decompiler
         uses: actions/upload-artifact@v4
