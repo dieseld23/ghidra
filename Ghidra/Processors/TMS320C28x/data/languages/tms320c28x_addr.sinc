@@ -98,13 +98,19 @@ loc16: "*+"loc_areg"["loc_imm3"]"  is ctx_AMODE=0 & loc_b76=0b11 & loc_areg & lo
     export *[ram]:2 a;
 }
 
-# --- 16-bit register-direct modes (@ARn / @AH / @AL / @PH / @PL / @TH / @SP) ----
+# --- 16-bit register-direct modes (@ARn / @AH / @AL / @PH / @PL / @T / @SP) -----
 loc16: "@"loc_areg16  is ctx_AMODE=0 & loc_mode5=0b10100 & loc_areg16 { export loc_areg16; }
 loc16: "@AH"  is ctx_AMODE=0 & loc_full8=0b10101000 { export AH; }
 loc16: "@AL"  is ctx_AMODE=0 & loc_full8=0b10101001 { export AL; }
 loc16: "@PH"  is ctx_AMODE=0 & loc_full8=0b10101010 { export PH; }
 loc16: "@PL"  is ctx_AMODE=0 & loc_full8=0b10101011 { export PL; }
-loc16: "@TH"  is ctx_AMODE=0 & loc_full8=0b10101100 { export T;  }   # @TH == high half of XT == T
+loc16: "@T"   is ctx_AMODE=0 & loc_full8=0b10101100 { export T;  }
+# ^ B1 (2026-07-30): the display literal was "@TH". SPRU430F names the halves of the 32-bit
+# multiplicand XT as T = XT(31:16) and TL = XT(15:0) -- "TH" appears NOWHERE in the vendor
+# document, and IDA (this project's authoritative disassembler) renders it T. The REGISTER was
+# already correct (see tms320c28x.slaspec: "define register offset=0x10 size=2 [ TL T ]"); only
+# this print string was wrong, so the fix is presentational and carries no p-code risk.
+# 91 disassembly sites + 2 decompiled C lines stop needing a silent mental rename.
 loc16: "@SP"  is ctx_AMODE=0 & loc_full8=0b10101101 { export SP; }
 
 # --- circular (*BR0++/--) and ARP-pointer (*,ARPn) modes (Table 5-1) -------------

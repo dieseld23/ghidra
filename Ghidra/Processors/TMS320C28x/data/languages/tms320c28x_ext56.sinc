@@ -17,9 +17,9 @@
 # Common ALU forms (real semantics).  word1 = 0x56<sub>, word2 = loc.
 # =============================================================================
 # ADDL loc32,ACC    0x5601 : 0000 0000 LLLL LLLL
-:ADDL loc32, ACCreg  is op16=0x5601 ; loc32 & ACCreg  { loc32 = loc32 + ACC; }
+:ADDL loc32, ACCreg  is op16=0x5601 ; loc32 & ACCreg  { local r:4 = loc32 + ACC; loc32 = r; setNZ32(r); }  # S13 (#83b): 383 sites
 # SUBL loc32,ACC    0x5641
-:SUBL loc32, ACCreg  is op16=0x5641 ; loc32 & ACCreg  { loc32 = loc32 - ACC; }
+:SUBL loc32, ACCreg  is op16=0x5641 ; loc32 & ACCreg  { local r:4 = loc32 - ACC; loc32 = r; setNZ32(r); }   # S13 (#83b)
 # SUBRL loc32,ACC    0x5649  (reverse subtract: loc = ACC - loc)
 :SUBRL loc32, ACCreg is op16=0x5649 ; loc32 & ACCreg  { loc32 = ACC - loc32; }
 # ADD ACC,loc16<<T   0x5623  (shift by T(3:0))
@@ -190,6 +190,19 @@
 # COND is in word1's low nibble (cond4); word2 = 8-bit const (high byte, imm8_hi) +
 # loc16 (low byte). Conditional byte store: if (COND) [loc16] = 0:8bit. Previously the
 # immediate wasn't decoded (rendered literal "#8bit") and the store was never emitted.
+# S18 (#83g): UNC row FIRST -- it must be a PLAIN STORE, not 'if (UNC) store'.
+# Exactly the same reasoning as the B/SB UNC rows in tms320c28x_flow.sinc ("these MUST be a plain
+# `goto`, not `if(UNC)goto`") -- that lesson was applied to the branches but never to this conditional
+# byte-store. With the generic CC row, UNC exports a constant 1 and the body emits
+# 'take = 1; if (take == 0) goto inst_next;' = a CBRANCH on a constant-true condition. Ghidra can only
+# fold that away when "Eliminate unreachable code" is ON -- and #80 makes turning it OFF mandatory on
+# this firmware -- so every UNC site rendered as an ugly 'if (true) { ... }' wrapper.
+# Census of FC1.bin: 563 UNC sites vs only 4 with a real condition (EQ/HI/LO/LOS x1 each).
+# Worst affected: app_main 189, control_dispatch 62, alarm_engine_eval 61, state_dispatch 32,
+# freeze_prep_subseq 19, flow_demand_ctrl 14, flow_setpoint_scheduler 14, can_iap_handler(_ram) 56.
+:MOVB loc16, "#"imm8_hi, "UNC"  is op_hi8=0x56 & loc_hi4=0b1011 & cond4=0xf ; loc16 & imm8_hi {
+    loc16 = zext(imm8_hi:1);
+}
 :MOVB loc16, "#"imm8_hi, CC  is op_hi8=0x56 & loc_hi4=0b1011 & cond4 & CC ; loc16 & imm8_hi {
     local take:1 = CC;
     if (take == 0) goto inst_next;
@@ -225,9 +238,10 @@
 }
 
 # --- 0x56-prefix 64/long shifts (single-word, fixed sub-opcode) --------------
-:LSLL "ACC,T"   is op16=0x563b { local s:4 = zext(T) & 0x1f; ACC = ACC << s; }
-:LSRL "ACC,T"   is op16=0x5622 { local s:4 = zext(T) & 0x1f; ACC = ACC >> s; }
-:ASRL "ACC,T"   is op16=0x5610 { local s:4 = zext(T) & 0x1f; ACC = ACC s>> s; }
+# S13 (#83b): all three set Z,N,C per SPRU430F; no flags were written. 129 sites.
+:LSLL "ACC,T"   is op16=0x563b { local s:4 = zext(T) & 0x1f; ACC = ACC << s;   setNZ32(ACC); }
+:LSRL "ACC,T"   is op16=0x5622 { local s:4 = zext(T) & 0x1f; ACC = ACC >> s;   setNZ32(ACC); }
+:ASRL "ACC,T"   is op16=0x5610 { local s:4 = zext(T) & 0x1f; ACC = ACC s>> s;  setNZ32(ACC); }
 
 # =============================================================================
 # Batch 15 (2026-06-23): 0x56-family gaps from the prologue-seeded truncation
@@ -253,7 +267,15 @@
 :FLIP AXb0  is op_hi8=0x56 & op_lo71=0b0111000 & AXb0  { AXb0 = AXb0; }
 # CSB ACC  0101 0110 0011 0101  (count sign bits: T = leading-sign-bit count - 1).
 # Modeled opaque (no SLEIGH clz); write T so dataflow continues.
-:CSB "ACC"  is op16=0x5635  { T = T; }
+# S15 (#83c): was `{ T = T; }` -- an identity stub that ASSERTS T is unchanged, so the decompiler
+# treated T as an incoming value (`in_T` phantom) and the exponent arithmetic in u64_to_f32 /
+# u32_to_f32 / sqrtf read as nonsense. SPRU430F: CSB counts leading sign bits and stores (count-1)
+# in T, and sets N,Z. There is no CLZ p-code op, so use an explicit pcodeop -- opaque but HONEST
+# about the dependency, and consistent with this module's SINPUF32 / VCRC8L convention.
+# countSignBitsMinus1 is now declared in tms320c28x_more.sinc -- S32 (2026-07-30) added a
+# second user (the fused RPT #0x1F || NORM), and more.sinc is @included BEFORE this file,
+# so the declaration had to move up to stay ahead of first use.  Same op, same meaning.
+:CSB "ACC"  is op16=0x5635  { T = countSignBitsMinus1(ACC); setNZ32(ACC); }
 # ABSTC ACC  0101 0110 0101 1111  (ACC = |ACC|; TC ^= sign bit). dis2000-confirmed (DIR).
 :ABSTC "ACC"  is op16=0x565f  {
     local neg:1 = (ACC s< 0);
@@ -298,10 +320,32 @@
     local v:8 = (zext(ACC) << 32) | zext(P);
     v = v << s; ACC = v(4); P = v(0);
 }
-# SUBCUL ACC,loc32  0101 0110 0001 0111 : loc32  (conditional 32-bit subtract step;
-# divide primitive). Modeled as the plain subtract (the conditional-restore detail
-# isn't tracked); keeps dataflow + flow continuing.
-:SUBCUL ACCreg, loc32  is op16=0x5617 ; loc32 & ACCreg  { ACC = ACC - loc32; }
+# SUBCUL ACC,loc32  0101 0110 0001 0111 : loc32  (conditional 32-bit subtract; the unsigned
+# modulus-division primitive).
+# S23 (2026-07-26): the old body was a PLAIN SUBTRACT and never wrote P, so the QUOTIENT was
+# never produced and every compiler 32/32 unsigned divide decompiled as the bare numerator.
+# SPRU430F p.417 gives the exact operation:
+#     temp(32:0) = ACC << 1 + P(31) - [loc32];
+#     if (temp(32:0) >= 0) { ACC = temp(31:0); P = (P << 1) + 1; }
+#     else                 { ACC:P = ACC:P << 1; }
+# and states: "After executing the SUBCUL instruction 32 times, the ACC register will contain
+# the Remainder and the P register will contain the Quotient results."  Z per the same page:
+# "At the end of the operation, the Z flag is set if the ACC value is zero".
+# 15 sites in FC1.bin; 12 are the /100 in pwm_duty_dispatch, so every PWM duty value in the
+# decompiled C was the undivided product.
+:SUBCUL ACCreg, loc32  is op16=0x5617 ; loc32 & ACCreg  {
+    local den:4 = loc32;
+    local hi:4 = (ACC << 1) | zext(P >> 31);
+    if (hi < den) goto <shift_only>;
+    ACC = hi - den;
+    P = (P << 1) + 1;
+    goto <done>;
+  <shift_only>
+    ACC = hi;
+    P = P << 1;
+  <done>
+    setNZ32(ACC);
+}
 # MOVX TL,loc16  0101 0110 0010 0001 : 0000 0000 LLLL LLLL  (sign-extend [loc16] into
 # the low half of XT; high half = sign). XT low 16 = loc16, T (high) = sign-extend.
 :MOVX "TL", loc16  is op16=0x5621 ; loc16  { XT = sext(loc16); }
@@ -317,4 +361,18 @@
 # MOVH loc16,ACC<<#2..8  0101 0110 0010 1111 : 0000 0SHF LLLL LLLL  (save high word).
 :MOVH loc16, "ACC<<#2..8"  is op16=0x562f ; loc16 & shft_hi4  {
     local v:4 = ACC << zext(shft_hi4:1); loc16 = v(2);
+}
+
+# ADDL ACC,P << PM   0001 0000 1010 1100 = 0x10AC  (SPRU430F opcode table)
+# S29a (#114): this encoding collided with `MOVA Treg,loc16` (op_hi8=0x10 with ANY
+# low byte) and lost, so a real ADDL decoded as `MOVA T,@TH` -> `ACC = ACC + P`
+# with no PM shift.  With SPM -1 in effect that is exactly 2x too large: the
+# sqrtf "2x" defect.  The image has ONE site: 0x3EACDA in sqrtf.
+:ADDL ACCreg, "P << PM"  is op16=0x10AC & ACCreg  {
+    local sp:4;
+    pmShiftedP(sp);
+    $(C) = carry(ACC, sp);
+    $(V) = scarry(ACC, sp);
+    ACC = ACC + sp;
+    setNZ32(ACC);
 }

@@ -97,5 +97,22 @@ define context contextreg
   ctx_AMODE = (0,0)        # 0 = C28x modes (compiler default), 1 = C2xLP-compatible
 ;
 
+# =============================================================================
+# S29 (#114): PRODUCT SHIFT MODE.  PM = ST0[7,3] shifts the P register on every
+# transfer OUT of P.  SPRU430F Table 2-3 and 2944-2950:
+#   000 = left 1 (reset default, low bit zero-filled)     001 = no shift
+#   010..111 = right 1..6, and right shifts SIGN-EXTEND P.
+# Instructions that use PH or PL as operands ignore PM.
+# For PM>=1, "P s>> (PM-1)" covers both no-shift (PM=1) and right 1..6, so only
+# PM==0 needs the left shift.  Branch-free so the p-code stays straight-line.
+# =============================================================================
+macro pmShiftedP(out) {
+    local pm:4 = zext($(PM));
+    local pv:4 = P;
+    local isleft:4 = zext(pm == 0);
+    local sh:4 = (pm - 1) & 0x1f;   # pm==0 gives 0x1f; masked out by isleft below
+    out = (isleft * (pv << 1)) + ((1 - isleft) * (pv s>> sh));
+}
+
 # Tokens and instruction constructors live in the .sinc include.
 @include "tms320c28x.sinc"

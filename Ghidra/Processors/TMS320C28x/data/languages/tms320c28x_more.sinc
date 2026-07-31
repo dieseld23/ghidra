@@ -1,3 +1,10 @@
+# S26 (2026-07-26): flags are now computed from the RESULT VALUE, not by RE-READING the
+# destination. setNZ16(loc16) expanded to '$(N)=(loc16 s<0); $(Z)=(loc16==0);' where each
+# 'loc16' is a FRESH MEMORY READ -- so every read-modify-write emitted 3 loads + 1 store and
+# the C rendered as 'tmp = REG; REG = tmp & mask; x = REG; x = REG;'. Semantically identical
+# (SPRU430F defines the flags from [loc16] AFTER the operation, which is exactly the value
+# stored), and MORE faithful to hardware: the CPU sets the flags from the internal result, it
+# does not issue a second bus read. 782 RMW pairs + 426 duplicate reads across the corpus.
 # Additional C28x instructions seen in the real firmware (DIR/PM) but not in the
 # core families. Encodings verified against docs/c28x/ch6_instruction_detail.txt.
 # Included by tms320c28x.sinc.
@@ -47,7 +54,7 @@ lbdest: reloc  is op_hi8=0x00 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc
 # MOVDL XT,loc32    1010 0110 LLLL LLLL  -- store XT to loc32, then load XT from it
 :MOVDL "XT", loc32  is op_hi8=0xA6 & loc32  { loc32 = XT; XT = loc32; }
 # MOVAD T,loc16     1010 0111 LLLL LLLL  -- T=loc16; ACC+=P (like MOVA, addr variant)
-:MOVAD "T", loc16   is op_hi8=0xA7 & loc16  { ACC = ACC + P; T = loc16; }
+:MOVAD "T", loc16   is op_hi8=0xA7 & loc16  { local sp:4; pmShiftedP(sp); ACC = ACC + sp; T = loc16; }  # S29b (#114)
 # DMOV loc16        1010 0101 LLLL LLLL  -- data move [loc16+1]=[loc16] (delay line)
 :DMOV loc16         is op_hi8=0xA5 & loc16  { }   # decode-only (memory shuffle)
 
@@ -64,25 +71,52 @@ lbdest: reloc  is op_hi8=0x00 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc
     AX = (AX & 0x00FF) | ((loc16 & 0xFF) << 8);
 }
 # MOVB loc16, AX.LSB   0011 110A LLLL LLLL  -- store low byte of AX into loc16.
-# (Spec writes only 8 bits of loc16, the other byte by address parity; we approximate
-# with a 16-bit zero-extended store, which is fine for decompilation.)
-:MOVB loc16, AX^".LSB"  is op_hi7=0x1E & loc16 & AX  { loc16 = AX & 0xFF; }
+# S22 (2026-07-26): the old body was a 16-bit ZERO-EXTENDED store, which DESTROYED the
+# untouched high byte. SPRU430F p.291: "else [loc16.LSB] = AX.LSB; [loc16.MSB] = unchanged;
+# ... This is a read-modify-write operation."  114 store-form sites in FC1.bin, and a census
+# confirmed ZERO use the *+XARn[offset] form, so the doc's even/odd byte-lane clause never
+# applies here and the single rule below is exact for this firmware. Blast radius of the old
+# body: every CAN payload byte-pack (app_main 82, can_iap_handler 7, can_iap_handler_ram 7,
+# can_bootloader_main 7, bl_main 4, state_dispatch 4, reflash_erase_run 1).
+:MOVB loc16, AX^".LSB"  is op_hi7=0x1E & loc16 & AX  {
+    loc16 = (loc16 & 0xFF00) | (AX & 0x00FF);
+}
 
 # --- ALU additions -----------------------------------------------------------
 # SUBU ACC, loc16   0000 0001 LLLL LLLL   (subtract unsigned)
 :SUBU ACCreg, loc16  is op_hi8=0x01 & ACCreg & loc16  { ACC = ACC - zext(loc16); }
 # SUBB ACC, #8bit   0001 1001 CCCC CCCC
-:SUBB ACCreg, "#"imm8  is op_hi8=0x19 & ACCreg & imm8  { ACC = ACC - zext(imm8:1); }
-# ADDB ACC, #8bit   0000 1001 CCCC CCCC
-:ADDB ACCreg, "#"imm8  is op_hi8=0x09 & ACCreg & imm8  { ACC = ACC + zext(imm8:1); }
+# S5 (#83): setNZ32 was missing -- SPRU430F sets Z,N,C,V. 11 branch sites. (C/V left unmodelled:
+# on C28x subtraction CLEARS C on borrow, inverse of add -- verify before adding.)
+:SUBB ACCreg, "#"imm8  is op_hi8=0x19 & ACCreg & imm8  { ACC = ACC - zext(imm8:1); setNZ32(ACC); }
+# ADDB ACC, #8bit   0000 1001 CCCC CCCC   (imm here IS zero-extended -- SPRU430F "ADDB ACC,#8bit")
+# S6 (#83): setNZ32 was missing -- SPRU430F sets Z,N,C. 8 branch sites.
+:ADDB ACCreg, "#"imm8  is op_hi8=0x09 & ACCreg & imm8  { ACC = ACC + zext(imm8:1); setNZ32(ACC); }
 # ADDB AX, #8bit    1001 110A CCCC CCCC
+# S2 (#83): the immediate is SIGNED here -- SPRU430F calls it "ADDB AX, #8bitSigned": "Add the sign
+# extended 8-bit constant", example 'ADDB AL,#-3' adds 0xFFFD. IDA renders it 'addb AL,#-1'. The
+# old zext() made the p-code VALUE wrong (AL+255 vs AL-1), e.g. interp1d's y_table[i-1] bracket
+# lookup printed as y_table[i + 0xff]. 32 sites in FC1.bin.
 :ADDB AX, "#"imm8   is op_hi7=0x4E & AX & imm8  {
-    local b:2 = zext(imm8:1);
+    local b:2 = sext(imm8:1);
     $(C) = carry(AX, b); $(V) = scarry(AX, b);
     AX = AX + b; setNZ16(AX);
 }
 # SUBCU ACC, loc16  0001 1111 LLLL LLLL   (conditional subtract, divide step) decode-only
-:SUBCU ACCreg, loc16  is op_hi8=0x1F & ACCreg & loc16  { }   # decode-only (divide primitive)
+# S12 (#83b): body was EMPTY -- the decompiler dropped the division entirely at 3 soft-float sites
+# (0x3EAB31 fdiv, 0x3EAF7A, 0x3EB099). SPRU430F: temp(32:0) = (ACC<<1) - ([loc16]<<16);
+# ACC = (temp > 0) ? temp+1 : ACC<<1.  Run 16x => AH=remainder, AL=quotient (unsigned modulus divide).
+:SUBCU ACCreg, loc16  is op_hi8=0x1F & ACCreg & loc16  {
+    local num:8  = zext(ACC) << 1;
+    local den:8  = zext(loc16) << 16;
+    local temp:8 = num - den;
+    if (temp s<= 0) goto <shift_only>;
+    ACC = temp:4 + 1;
+    goto <done>;
+  <shift_only>
+    ACC = ACC << 1;
+  <done>
+}
 
 # --- multiply additions ------------------------------------------------------
 # MPYXU ACC,T,loc16   0011 0000 LLLL LLLL  (signed x unsigned -> ACC)
@@ -149,10 +183,10 @@ lbdest: reloc  is op_hi8=0x00 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc
 # Batch 2: common store/stack/program-memory ops found breaking real code runs.
 # =============================================================================
 # OR loc16, AX     1001 100A LLLL LLLL  (A bit -> AL/AH)
-:OR loc16, AX     is op_hi7=0x4C & loc16 & AX  { loc16 = loc16 | AX; }
+:OR loc16, AX     is op_hi7=0x4C & loc16 & AX  { local r:2 = loc16 | AX; loc16 = r; setNZ16(r); }   # S14 (#83c)
 # AND loc16, AX    1100 000A LLLL LLLL  (store-side AND: [loc16] &= AX). Was MISSING —
 # the truncation point in CAN_rxDispatch (0x9595c = 0xC092). N/Z set per SPRU430F.
-:AND loc16, AX    is op_hi7=0x60 & loc16 & AX  { loc16 = loc16 & AX; setNZ16(loc16); }
+:AND loc16, AX    is op_hi7=0x60 & loc16 & AX  { local r:2 = loc16 & AX; loc16 = r; setNZ16(r); }
 # ANDB AX, #8bit   1001 000A CCCC CCCC
 :ANDB AX, "#"imm8  is op_hi7=0x48 & AX & imm8  { AX = AX & zext(imm8:1); setNZ16(AX); }
 # PUSH loc16       0010 0010 LLLL LLLL  (push 16-bit value: *SP++ = loc16)
@@ -166,6 +200,22 @@ lbdest: reloc  is op_hi8=0x00 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc
 # MOV IER, loc16   0010 0011 LLLL LLLL
 :MOV "IER", loc16  is op_hi8=0x23 & loc16  { IER = loc16; }
 # PREAD loc16,*XAR7   0010 0100 LLLL LLLL  (read program memory @XAR7 -> loc16)
+# S20 (#90): loc16 = @AX DESTINATION SETS N,Z.  SPRU430F p.368 "PREAD loc16,*XAR7",
+# Flags and Modes:
+#     N -- "If (loc16 = @AX) and bit 15 of AX is 1, then N is set; otherwise N is cleared."
+#     Z -- "If (loc16 = @AX) and the value of AX is zero, then Z is set; otherwise Z is cleared."
+# (@AX = @AL or @AH; see also section 5.7.2 p.101: "When the '@AL' register is the destination
+#  operand, this may affect the Z,N,V,C,OVC flags.")
+# The generic row left the flags stale. The firmware depends on it: 0x3EAE39 'PREAD @AL,*XAR7' /
+# 0x3EAE3A 'SB +3,GEQ' / 0x3EAE3B 'NEG AL' is an absolute-value idiom -- "load, if >= 0 skip the
+# negate" -- which is simply wrong without N. 2 stale-flag branch sites (0x3EAE39, 0x3F7056).
+# Specific rows precede the generic one.
+:PREAD "@AL", "*XAR7"  is op_hi8=0x24 & ctx_AMODE=0 & loc_full8=0b10101001  {
+    AL = *[ram]:2 XAR7; setNZ16(AL);
+}
+:PREAD "@AH", "*XAR7"  is op_hi8=0x24 & ctx_AMODE=0 & loc_full8=0b10101000  {
+    AH = *[ram]:2 XAR7; setNZ16(AH);
+}
 :PREAD loc16, "*XAR7"  is op_hi8=0x24 & loc16  {
     loc16 = *[ram]:2 XAR7;
 }
@@ -183,13 +233,19 @@ lbdest: reloc  is op_hi8=0x00 & op_lo_76=0b01 & loc_off6 ; imm16  [ reloc = (loc
 # word1 = opcode + loc ; word2 = 16-bit immediate.
 # =============================================================================
 # ADD loc16,#16bit   0000 1000 LLLL LLLL : iiii
-:ADD loc16, "#"imm16  is op_hi8=0x08 & loc16 ; imm16  { loc16 = loc16 + imm16:2; }
+# S4 (#83): setNZ16 was missing -- SPRU430F "ADD loc16,#16bitSigned" sets N,Z,C,V. 17 branch sites,
+# all inside the soft-float helpers (fadd/fmul/fdiv/f32_to_i32). C/V left unmodelled as before.
+:ADD loc16, "#"imm16  is op_hi8=0x08 & loc16 ; imm16  {
+    local r:2 = loc16 + imm16:2; loc16 = r; setNZ16(r);
+}
 # AND loc16,#16bit   0001 1000 LLLL LLLL : iiii
-:AND loc16, "#"imm16  is op_hi8=0x18 & loc16 ; imm16  { loc16 = loc16 & imm16:2; }
+# S14 (#83c): SPRU430F gives N,Z for all three of these; none wrote flags. AND had 364 flag-less sites,
+# OR 325, XOR 7. (AND loc16,AX already had setNZ16 -- OR/XOR loc16,AX did not; fixed below.)
+:AND loc16, "#"imm16  is op_hi8=0x18 & loc16 ; imm16  { local r:2 = loc16 & imm16:2; loc16 = r; setNZ16(r); }
 # OR loc16,#16bit    0001 1010 LLLL LLLL : iiii
-:OR loc16, "#"imm16   is op_hi8=0x1A & loc16 ; imm16  { loc16 = loc16 | imm16:2; }
+:OR loc16, "#"imm16   is op_hi8=0x1A & loc16 ; imm16  { local r:2 = loc16 | imm16:2; loc16 = r; setNZ16(r); }
 # XOR loc16,#16bit   0001 1100 LLLL LLLL : iiii
-:XOR loc16, "#"imm16  is op_hi8=0x1C & loc16 ; imm16  { loc16 = loc16 ^ imm16:2; }
+:XOR loc16, "#"imm16  is op_hi8=0x1C & loc16 ; imm16  { local r:2 = loc16 ^ imm16:2; loc16 = r; setNZ16(r); }
 # XPREAD loc16,*(pma)  1010 1100 MMMM MMMM : pma  (program-mem read, single-word form)
 :XPREAD loc16, "*(pma)"  is op_hi8=0xAC & loc16 ; imm16  {
     local pma:4 = zext(imm16:2);
@@ -231,7 +287,7 @@ macro pop16(dst) { SP = SP - 1; local a:4 = zext(SP); dst = *[ram]:2 a; }
 }
 # LSR AX,T   1111 1111 0110 001A
 :LSR AXb0, "T"  is op_hi8=0xFF & op_lo71=0b0110001 & AXb0  {
-    local sh:2 = T & 0xf; AXb0 = AXb0 >> sh;
+    local sh:2 = T & 0xf; AXb0 = AXb0 >> sh; setNZ16(AXb0);   # S7 (#83): sets N,Z,C (C unmodelled)
 }
 # LSL AX,T   1111 1111 0110 011A  (logical shift left by T)
 :LSL AXb0, "T"  is op_hi8=0xFF & op_lo71=0b0110011 & AXb0  {
@@ -281,14 +337,15 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 # =============================================================================
 # ASR/LSR/LSL AX,#1..16   1111 1111 sssA SHFT  (sss: ASR=101 LSR=110 LSL=100,
 # A=bit4 selects AL/AH, SHFT=0 means 16). Single word. SPRU430F ch6.
+# S7 (#83): all three set N,Z,C per SPRU430F; setNZ16 was missing. LSR AX,#8 has 4 branch sites.
 :ASR AXb4, "#"shcount  is op_hi8=0xFF & op_lo765=0b101 & AXb4 & shcount {
-    AXb4 = AXb4 s>> shcount;
+    AXb4 = AXb4 s>> shcount; setNZ16(AXb4);
 }
 :LSR AXb4, "#"shcount  is op_hi8=0xFF & op_lo765=0b110 & AXb4 & shcount {
-    AXb4 = AXb4 >> shcount;
+    AXb4 = AXb4 >> shcount; setNZ16(AXb4);
 }
 :LSL AXb4, "#"shcount  is op_hi8=0xFF & op_lo765=0b100 & AXb4 & shcount {
-    AXb4 = AXb4 << shcount;
+    AXb4 = AXb4 << shcount; setNZ16(AXb4);
 }
 
 # SETC Mode   0011 1011 CCCC CCCC  -- set status bits per 8-bit mask. Common
@@ -326,7 +383,10 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 
 # SAT ACC   1111 1111 0101 0111  (saturate ACC per OVC; modeled flow-preserving —
 # the OVC-driven clamp isn't tracked, so write ACC so dataflow continues).
-:SAT "ACC"  is op16=0xFF57 { ACC = ACC; }
+# S16 (#83c): was `{ ACC = ACC; }` -- claims no change. SAT saturates ACC based on OVC. Opaque
+# pcodeop is honest; the identity form told the decompiler the instruction did nothing.
+define pcodeop saturateAcc;
+:SAT "ACC"  is op16=0xFF57 { ACC = saturateAcc(ACC); }
 
 # ROL ACC   1111 1111 0101 0011  (rotate ACC left through carry: C<-b31, b0<-C).
 :ROL "ACC"  is op16=0xFF53 {
@@ -338,15 +398,36 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 # NORM ACC,XARn++/--   1111 1111 0111 Xnnn  (normalize ACC, post-inc/dec XARn; X=bit3
 # selects ++/--, nnn=ARn via loc_areg). The normalize-shift isn't tracked; model the AR
 # post-modify and write ACC so dataflow + flow continue. Was the truncation behind 0xff77.
-:NORM "ACC,"loc_areg^"++"  is op_hi8=0xFF & op_lo765=0b011 & norm_pm=1 & loc_areg { ACC = ACC; loc_areg = loc_areg + 1; }
-:NORM "ACC,"loc_areg^"--"  is op_hi8=0xFF & op_lo765=0b011 & norm_pm=0 & loc_areg { ACC = ACC; loc_areg = loc_areg + (-1); }
+# S16 (#83c): the `ACC = ACC;` identity claimed NORM leaves ACC untouched. It normalises ACC
+# (shifts left until bit31 != bit30) -- 7 sites in FC1.bin. Opaque pcodeop instead of a false identity.
+define pcodeop normalizeAcc;
+# S32 (2026-07-30): moved here from tms320c28x_ext56.sinc (where S15 declared it for CSB).
+# The fused RPT||NORM constructor below is a second user and this file is included first,
+# so the declaration must lead both uses.  SPRU430F: leading sign bits of ACC, minus one.
+define pcodeop countSignBitsMinus1;
+:NORM "ACC,"loc_areg^"++"  is op_hi8=0xFF & op_lo765=0b011 & norm_pm=1 & loc_areg { ACC = normalizeAcc(ACC); loc_areg = loc_areg + 1; }
+:NORM "ACC,"loc_areg^"--"  is op_hi8=0xFF & op_lo765=0b011 & norm_pm=0 & loc_areg { ACC = normalizeAcc(ACC); loc_areg = loc_areg + (-1); }
 
 # =============================================================================
 # Batch 9: final rts-validation gaps — MOV ACC,#16bit<<#shift, CMPB AX,#8bit.
 # =============================================================================
 # MOV ACC,#16bit<<#0..15   1111 1111 0010 SHFT : iiii iiii iiii iiii  (2-word)
+# S9/S10 (#83b): SPRU430F -- "if(SXM=1) ACC = S:16bit << shift; else ACC = 0:16bit << shift".
+# The old unconditional zext() sign-flipped negative float constants: 0x3E84D2 MOV ACC,#0x8490<<#15 is
+# -50.0f in hardware but decompiled as +50.0f (an alarm threshold!). Also 0x3E9DF4 (-100.0f,
+# sensor_curve_eval), 0x3E92F7 (-150.0f, powf), 0x3E9932, 0x3F1F2D. Now reads $(SXM).
+# REVISED after measurement: unconditional sext() beats an $(SXM) conditional here. Census of all 342
+# `MOV/ADD/SUB ACC,#imm16<<#n` sites (shift<16) in FC1.bin:
+#     SXM=0: 209 sites, ALL with imm < 0x8000  -> sext == zext, identical
+#     undecidable: 107 sites, ALL with imm < 0x8000 -> identical
+#     SXM=1: 26 sites, of which the 5 with imm >= 0x8000 are the sign-flipped float constants
+# So sext() is correct at EVERY site in this firmware AND still folds to a constant. The conditional
+# form was semantically right but left the decompiler unable to fold, printing `(float)(lVar1 << 0xf)`
+# instead of `-50.0`. If this module is ever reused on a binary with SXM=0 + imm >= 0x8000, restore the
+# $(SXM) conditional (kept in tms320c28x.sla.pre_sweep2_20260725_bak's source, and in SFR below).
 :MOV ACCreg, "#"imm16^"<<#"^shft4 is op_hi8=0xFF & loc_hi4=0b0010 & shft4 & ACCreg ; imm16 {
-    local v:4 = zext(imm16:2); local s:4 = zext(shft4:1); ACC = v << s;
+    local s:4 = zext(shft4:1);
+    ACC = sext(imm16:2) << s;
 }
 # CMPB AX,#8bit   0101 001A CCCC CCCC  (compare AX with zero-ext 8-bit; set flags)
 :CMPB AX, "#"imm8  is op_hi7=0x29 & AX & imm8 {
@@ -414,12 +495,116 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 # The hardware repeat-counter (RPTC) isn't modeled, but the body must be non-empty
 # or the decompiler treats it as a bad instruction and truncates. Read the count
 # into a scratch so dataflow continues; the actual repeat is left to disassembly.
+# S30 (2026-07-28, finding #123): FUSED "RPT #31 || SUBCUL ACC,loc32".
+# RPT is a prefix whose repeat count SLEIGH cannot model in general, so a repeated
+# instruction decompiles as ONE iteration. All 15 SUBCUL sites in this image are the
+# canonical 32-step unsigned 64/32 divide (RPT #31 || SUBCUL) -- 12 are the /100 in
+# pwm_duty_dispatch and 3 are in app_main, so every divided value in that C was the
+# UNDIVIDED product. Rather than model RPT generally (which would mean touching the
+# semantics of MOV/MOVL, the two most common instructions in the image), match the exact
+# three-word idiom  F6 1F | 56 17 | loc32  as ONE instruction and emit the closed form.
+# SPRU430F p.417: "After executing the SUBCUL instruction 32 times, the ACC register will
+# contain the Remainder and the P register will contain the Quotient results."
+# Scoped to imm8=0x1F so it cannot affect any other RPT or any other SUBCUL. Declared
+# BEFORE the plain :RPT so declaration order also favours it (the S29a decode-tie lesson).
+:SUBCUL32 ACCreg, loc32  is op_hi8=0xF6 & imm8=0x1F ; op16=0x5617 ; loc32 & ACCreg {
+    local a:8   = zext(ACC);
+    local pv:8  = zext(P);
+    local num:8 = (a << 32) | pv;
+    local den:8 = zext(loc32);
+    local q:8   = num / den;
+    local r:8   = num % den;
+    P   = q:4;
+    ACC = r:4;
+    setNZ32(ACC);
+}
+# =============================================================================
+# S32 (2026-07-30, improvement-list item A1): FUSED "RPT #imm || <insn>" FORMS.
+#
+# RPT is a PREFIX: its count applies to the FOLLOWING instruction, which SLEIGH
+# cannot express as a constructor body.  So a repeated instruction decompiles as
+# exactly ONE iteration and every value it produces is wrong.  Rather than model
+# RPT generally, match the exact multi-word idioms as single instructions and
+# emit the closed form -- the same tactic S30 used for RPT #31 || SUBCUL.
+#
+# Corpus basis (re-derived 2026-07-30 from _audit_20260730/ghidra_insns.tsv --
+# all 49 RPT sites in FC1.bin, tallied by the instruction that follows):
+#     MOV   26   all of them literally  MOV *XAR4++,#0     -> block clear
+#     NOP    8   nothing to model (delay padding)
+#     SUBCU  7   4x #0xF (canonical 16-step divide) + 3x partial in fdiv
+#     NORM   6   all of them  RPT #0x1F || NORM ACC,XARn--
+#     PREAD  2   dynamic count (RPT @AR1) in _c_int00/bl_c_int00 -- NOT fused
+# The three constructors below cover 36 of the 39 value-carrying sites.  The 8
+# NOP sites need nothing; the 2 PREAD sites have a runtime count and the 3
+# partial-count SUBCU sites in fdiv are NOT the canonical divide, so for those a
+# closed form would be WRONG -- they are deliberately left on the 1-iteration
+# model.  Do not "finish the job" by widening these patterns.
+#
+# Each is scoped to its exact repeat count so it cannot capture any other RPT,
+# and each is declared BEFORE the plain :RPT so declaration order also favours
+# it (the S29a decode-tie lesson).
+# =============================================================================
+
+# --- RPT #imm || MOV *XARn++,#0 : word-granular block clear (26 sites) --------
+# SPRU430F "MOV loc16,#0" repeated N+1 times through the *XARn++ mode clears N+1
+# consecutive words and leaves XARn advanced by N+1.  Unfused, exactly ONE word
+# was cleared and XARn advanced by 1: cellmon_acquire alone loses ~800 words of
+# clear across its 14 sites, so any reader tracing the cell-voltage buffers saw
+# stale data that the firmware had in fact zeroed.
+# Modelled with a pcodeop rather than an unrolled store sequence: the counts here
+# run to 0xBF (192 words), and unrolling would bury the function in stores. The
+# pcodeop is opaque but HONEST about the extent of the write, and matches this
+# module's existing convention (countSignBitsMinus1 / normalizeAcc / SINPUF32).
+define pcodeop clearWords;
+:MOVCLR "*"loc_areg^"++,#0", "RPT #"imm8  is op_hi8=0xF6 & imm8 ; op_hi8=0x2B & ctx_AMODE=0 & loc_mode5=0b10000 & loc_areg {
+    local n:2 = zext(imm8:1) + 1;
+    clearWords(loc_areg, n);
+    loc_areg = loc_areg + zext(n);
+}
+
+# --- RPT #0x1F || NORM ACC,XARn-- : full normalisation (6 sites) -------------
+# NORM shifts ACC left while the top two bits are equal (i.e. while ACC is not
+# normalised), stepping XARn once per shift.  Repeated 32x it runs to completion,
+# so the closed form is exact: the shift count is precisely the number of leading
+# sign bits minus one -- which is what CSB computes and what the countSignBitsMinus1
+# pcodeop added by S15 already denotes.  Reusing it keeps one concept, one op.
+# Unfused, ACC was normalised by the opaque normalizeAcc() but XARn moved by only
+# 1 instead of n, so every soft-float EXPONENT built from that pointer was wrong:
+# fdiv (x2), fadd, i32_to_f32, u32_to_f32, u16_to_f32.
+# Edge case: ACC == 0 never normalises; hardware leaves ACC and XARn alone, while
+# countSignBitsMinus1(0) is 31.  No site in this image reaches NORM with ACC == 0
+# (each is preceded by a zero test that branches away), so this is documented
+# rather than special-cased -- adding a branch here would cost every site legibility.
+:NORM32 "ACC,"loc_areg^"--", "RPT #0x1F"  is op_hi8=0xF6 & imm8=0x1F ; op_hi8=0xFF & op_lo765=0b011 & norm_pm=0 & loc_areg {
+    local n:4 = countSignBitsMinus1(ACC);
+    ACC = ACC << n;
+    loc_areg = loc_areg - n;
+}
+
+# --- RPT #0xF || SUBCU ACC,loc16 : canonical 16-step unsigned divide (4 sites)
+# SPRU430F: 16 iterations of the restoring-division step leave AH = remainder and
+# AL = quotient.  Sites: i16_div, i16_mod, u16_div, u16_mod -- the compiler's
+# 16-bit divide helpers, so EVERY 16-bit division in the firmware routed through
+# a function whose C showed one subtract step instead of a quotient.
+# Scoped to imm8=0xF so the three PARTIAL-count SUBCU sites in fdiv (#0xE/#0xA/#0xB)
+# are untouched -- those are normalisation-limited mantissa steps, not a full
+# divide, and this closed form would silently give them the wrong answer.
+# Assumes AH < [loc16] (no quotient overflow), which is the precondition the
+# compiler establishes before every one of these; same assumption S30 made.
+:SUBCU16 ACCreg, loc16, "RPT #0xF"  is op_hi8=0xF6 & imm8=0xF ; op_hi8=0x1F & ACCreg & loc16 {
+    local den:4 = zext(loc16);
+    local q:4 = ACC / den;
+    local r:4 = ACC % den;
+    ACC = (r << 16) | (q & 0xFFFF);
+    setNZ32(ACC);
+}
+
 :RPT "#"imm8  is op_hi8=0xF6 & imm8  { local c:2 = zext(imm8:1) + 1; }
 # RPT loc16   1111 0111 LLLL LLLL  -- repeat count from [loc16] (+1).
 :RPT loc16    is op_hi8=0xF7 & loc16 { local c:2 = loc16 + 1; }
 
 # XOR loc16, AX   1111 001A LLLL LLLL  -- store-side XOR (loc ^= AX). A bit -> AL/AH.
-:XOR loc16, AX  is op_hi7=0x79 & loc16 & AX  { loc16 = loc16 ^ AX; }
+:XOR loc16, AX  is op_hi7=0x79 & loc16 & AX  { local r:2 = loc16 ^ AX; loc16 = r; setNZ16(r); }   # S14 (#83c)
 
 # =============================================================================
 # Batch 11: more top misses from the byte-swapped F28377D production firmware sweep.
@@ -431,9 +616,13 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 
 # --- 0xFF-prefix fixed/shift forms ------------------------------------------
 # ABS ACC          1111 1111 0101 0110   (ACC = |ACC|; decode-only on the V/sat edge)
+# S8 (#83): SPRU430F sets N,Z,C(=0),V. setNZ32 was missing and the early 'goto inst_next' skipped
+# any flag write, so 'ABS ACC' / 'SB ...,OV' in i32_to_f32 bound to a stale flag.
 :ABS "ACC"   is op16=0xFF56 {
-    if (ACC s>= 0) goto inst_next;
+    if (ACC s>= 0) goto <keep>;
     ACC = -ACC;
+  <keep>
+    setNZ32(ACC); $(C) = 0;
 }
 # MOVL P,ACC       1111 1111 0101 1010
 :MOVL "P", ACCreg  is op16=0xFF5A & ACCreg { P = ACC; }
@@ -449,7 +638,8 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 :SPM "-6"  is op16=0xFF6F { $(PM) = 7; }
 # ADD ACC,#16bit<<#0..15   1111 1111 0001 SHFT : iiii iiii iiii iiii  (2-word)
 :ADD ACCreg, "#"imm16^"<<#"^shft4  is op_hi8=0xFF & loc_hi4=0b0001 & shft4 & ACCreg ; imm16 {
-    local v:4 = zext(imm16:2); local s:4 = zext(shft4:1); ACC = ACC + (v << s);
+    local s:4 = zext(shft4:1);            # S9 (#83b): sext -- see the census note above
+    ACC = ACC + (sext(imm16:2) << s);
 }
 # LSL ACC,#1..16   1111 1111 0011 SHFT  (logical shift left ACC; SHFT=0 -> 16). Single
 # word. C = last bit shifted out (= ACC bit 32-sh, pre-shift); N/Z from the result.
@@ -461,13 +651,38 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 }
 # SFR ACC,#1..16   1111 1111 0100 SHFT  (shift ACC right; SHFT=0 -> 16). Single word.
 # Reuse the shcount subtable (= shft4+1) used by the AX immediate shifts.
+# S17 (#83d): SFR ACC,T -- opcode 1111 1111 0101 0001 = 0xFF51 (SPRU430F, bit-exact match with the
+# undecodable word found in the firmware). This constructor was MISSING ENTIRELY, so 0xFF51 could not be
+# decoded, disassembly stopped mid-function, and the decompiler emitted halt_baddata(). Exactly 2 sites:
+# f32_to_i16 @0x3EAF3B and f32_to_u16 @0x3EAFE7 -- the ONLY two halt_baddata in the whole program.
+# IDA decodes it correctly as 'sfr ACC,T'. Shift right by T(3:0); arithmetic if SXM=1 else logical;
+# sets Z,N,C (C = last bit shifted out, or cleared when T(3:0)==0 -- C left unmodelled).
+:SFR ACCreg, "T"  is op16=0xFF51 & ACCreg {
+    local sh:4 = zext(T) & 0xf;
+    local rr:4 = ACC >> sh;
+    if ($(SXM) == 0) goto <store>;
+    rr = ACC s>> sh;
+  <store>
+    ACC = rr;
+    setNZ32(ACC);
+}
+
+# S11 (#83b): was an unconditional LOGICAL shift with no flags. SPRU430F: the shift is ARITHMETIC when
+# SXM=1 and logical when SXM=0, and it sets Z,N,C. 75 sites -- wrong VALUE for a negative ACC under SXM=1.
 :SFR ACCreg, "#"shcount  is op_hi8=0xFF & loc_hi4=0b0100 & ACCreg & shcount {
-    ACC = ACC >> shcount;
+    local sh:4 = zext(shcount);
+    local r:4  = ACC >> sh;
+    if ($(SXM) == 0) goto <store>;
+    r = ACC s>> sh;
+  <store>
+    ACC = r;
+    setNZ32(ACC);
 }
 # SUB ACC,#16bit<<#0..15   1111 1111 0000 SHFT : iiii  (2-word; counterpart to the
 # ADD ACC,#16bit<<# at 0xFF1x). 0xff00/0xff0f etc.
 :SUB ACCreg, "#"imm16^"<<#"^shft4  is op_hi8=0xFF & loc_hi4=0b0000 & shft4 & ACCreg ; imm16 {
-    local v:4 = zext(imm16:2); local s:4 = zext(shft4:1); ACC = ACC - (v << s);
+    local s:4 = zext(shft4:1);            # S9 (#83b): sext -- see the census note above
+    ACC = ACC - (sext(imm16:2) << s);
 }
 # NOT AX   1111 1111 0101 111A  (complement AL/AH; A=bit0).
 :NOT AXb0  is op_hi8=0xFF & op_lo71=0b0101111 & AXb0  { AXb0 = ~AXb0; setNZ16(AXb0); }
@@ -506,24 +721,50 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
     local v:4 = zext(loc16) << 16; ACC = ACC + v;
 }
 # CMP loc16, #16bitSigned   0001 1011 LLLL LLLL : iiii  (2-word; flags only).
+# S25 (2026-07-26): C was NOT WRITTEN and N was computed at 16-bit precision. SPRU430F:
+# "C - If the subtraction generates a borrow, then C is cleared; otherwise C is set." The same
+# page requires INFINITE-PRECISION N: "consider 0x8000 - 0x0001 ... because the CMP
+# instruction assumes infinite precision, it would set N" -- a truncated 16-bit result gives
+# 0x7FFF (N=0), which is wrong. ~20 sites; the carry-consuming ones produced wrong C code,
+# e.g. flash_erase's 5000-pulse retry limit and flash_compact's 2000-retry loop were folded
+# away entirely, and app_main 0x3F30FD/0x3F3111/0x3F332E showed invented conditions.
 :CMP loc16, "#"simm16  is op_hi8=0x1B & loc16 ; simm16 {
-    local x:2 = loc16; local y:2 = simm16:2; local r:2 = x - y;
-    $(N) = (r s< 0); $(Z) = (r == 0);
+    local x:2 = loc16; local y:2 = simm16:2;
+    local xw:4 = sext(x); local yw:4 = sext(y); local rw:4 = xw - yw;
+    $(C) = !(x < y);
+    $(Z) = (rw == 0);
+    $(N) = (rw s< 0);
 }
 # MPYU ACC,T,loc16   0011 0110 LLLL LLLL  (unsigned 16x16 -> ACC).
 :MPYU ACCreg, Treg, loc16  is op_hi8=0x36 & ACCreg & Treg & loc16 {
     local a:4 = zext(T); local b:4 = zext(loc16); ACC = a * b;
 }
-# SUB loc16, AX   0111 010A LLLL LLLL  (reverse-subtract: loc16 = AX - loc16).
-:SUB loc16, AX  is op_hi7=0x3A & loc16 & AX  { loc16 = AX - loc16; }
+# SUB loc16, AX   0111 010A LLLL LLLL
+# S24 (2026-07-26): OPERANDS WERE REVERSED. The old body computed AX - [loc16]; SPRU430F p.404
+# Description is explicit: "Subtract the content of the specified AX register (AH or AL) from
+# the 16-bit content of the location pointed to by the loc16 addressing mode and store the
+# result in location pointed to by loc16:  [loc16] = [loc16] - AX;"
+# NB the PAGE TITLE ("Reverse-Subtract Specified Location From AX") reads as if it were the
+# other way round -- trust the Description. SUBR loc16,AX below is the genuine reverse form.
+# 2 sites in FC1.bin, BOTH producing wrong values: powf 0x3E9343 (integer exponent) and
+# alarm_engine_eval 0x3E88DB (the alarm_id & 0xF bit index).
+:SUB loc16, AX  is op_hi7=0x3A & loc16 & AX  {
+    local m:2 = loc16;
+    $(C) = !(m < AX);
+    $(V) = sborrow(m, AX);
+    local r:2 = m - AX;
+    loc16 = r;
+    setNZ16(r);
+}
 # SUBR loc16, AX  1110 101A LLLL LLLL  (reverse-subtract store: [loc16] = AX - [loc16]).
 # Confirmed via dis2000 (word 0xeaa8) — the binary-pattern grep missed it. C/V/N/Z.
 :SUBR loc16, AX  is op_hi7=0x75 & loc16 & AX  {
     local m:2 = loc16;
     $(C) = !(AX < m);
     $(V) = sborrow(AX, m);
-    loc16 = AX - m;
-    setNZ16(loc16);
+    local r:2 = AX - m;
+    loc16 = r;
+    setNZ16(r);
 }
 # ADD loc16, AX   0111 001A LLLL LLLL  (store-side add: [loc16] = [loc16] + AX). Was
 # MISSING — truncation in FUN_000900f8 (word 0x72a6 = ADD *+XAR2[AR0],AL). C/V/N/Z.
@@ -531,8 +772,9 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
     local m:2 = loc16;
     $(C) = carry(m, AX);
     $(V) = scarry(m, AX);
-    loc16 = m + AX;
-    setNZ16(loc16);
+    local r:2 = m + AX;
+    loc16 = r;
+    setNZ16(r);
 }
 
 # =============================================================================
@@ -544,8 +786,9 @@ attach variables [ xarn_hi3 ] [ XAR0 XAR1 XAR2 XAR3 XAR4 XAR5 XAR6 XAR7 ];
 # truncation after FUN_00093327 / FUN_00093407 (load form).
 :MOV loc16, "*(0:"imm16")"  is op_hi8=0xF5 & loc16 ; imm16  {
     local a:4 = zext(imm16:2);
-    loc16 = *[ram]:2 a;
-    setNZ16(loc16);
+    local r:2 = *[ram]:2 a;
+    loc16 = r;
+    setNZ16(r);
 }
 # MOV *(0:16bit), loc16   1111 0100 LLLL LLLL : CCCC CCCC CCCC CCCC  (2-word).
 # Store counterpart of the above: [0:imm16] = [loc16]. The next gap behind the

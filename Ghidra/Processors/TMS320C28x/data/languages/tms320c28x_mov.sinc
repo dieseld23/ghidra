@@ -14,8 +14,13 @@
 # MOV AX, loc16     1001 001A LLLL LLLL   -- load AL/AH from 16-bit location
 # Top 7 bits (op_hi7) = 1001001 = 0x49; bit 8 = the A bit consumed by the AX subtable.
 :MOV AX, loc16      is op_hi7=0x49 & AX & loc16  {
-    AX = loc16;
+    AX = loc16; setNZ16(AX);
 }
+# ^ S1 (2026-07-25, #83): setNZ16 was MISSING. SPRU430F "MOV AX,loc16" sets N and Z -- TI's own
+# example is 'MOV AH,*+XAR0[0]' / 'SB NotZero,NEQ'. Without it the following conditional branch
+# bound to a STALE flag and the decompiler emitted a phantom in_ST0 predicate or silently reused an
+# unrelated boolean. 214 branch sites in FC1.bin (app_main 69, alarm_engine_eval 47,
+# state_dispatch 24, control_dispatch 20). See FCsim/C28x_SLEIGH_Flag_Defects.md.
 
 # MOV loc16, AX     1001 011A LLLL LLLL   -- store AL/AH to 16-bit location
 # Top 7 bits = 1001011 = 0x4B.
@@ -90,7 +95,7 @@
 
 # MOVL ACC, loc32   0000 0110 LLLL LLLL
 :MOVL ACCreg, loc32  is op_hi8=0x06 & ACCreg & loc32  {
-    ACC = loc32;
+    ACC = loc32; setNZ32(ACC);   # S3 (#83): SPRU430F sets N,Z. 18 branch sites.
 }
 
 # MOVL loc32, ACC   0001 1110 LLLL LLLL
@@ -117,6 +122,33 @@
 :MOVL loc32, XTreg  is op_hi8=0xAB & loc32 & XTreg  {
     loc32 = XT;
 }
+
+# =============================================================================
+# S19 (#90): loc32 = @ACC DESTINATION SETS N,Z.  SPRU430F p.304 "MOVL loc32, XARn",
+# Flags and Modes:
+#     N -- "If (loc32 = @ACC), then the load to ACC is tested for a negative condition.
+#           Bit-31 of the ACC register is the sign bit ... otherwise it is cleared."
+#     Z -- "If (loc32 = @ACC), then the load to ACC is tested for a zero condition."
+#   Example given by TI:  MOVL @ACC, XAR0  ; If bit 31 of the ACC is 1 set N. If ACC = 0, set Z.
+# and SPRU430F section 5.7.1 p.100 (32-bit register addressing): "When the '@ACC' register is
+# the destination operand, this may affect the Z,N,V,C,OVC flags."
+#
+# The generic rows below export loc32 and do a plain assignment, so when loc32 resolved to
+# @ACC (loc_full8 = 0b10101001) the flags were left STALE. The compiler relies on this
+# behaviour: e.g. flash_device_check 0x8447 'MOVL @ACC,XAR1' / 0x8448 'SBF ...,EQ' is the
+# null-pointer test 'if (dev_info != 0)', which without N,Z read whatever flags happened to
+# be live. 9 stale-flag branch sites in FC1.bin.
+# These specific rows must precede the generic ones (same convention as S18).
+:MOVL "@ACC", "XAR0"  is op_hi8=0x3A & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR0; setNZ32(ACC); }
+:MOVL "@ACC", "XAR1"  is op_hi8=0xB2 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR1; setNZ32(ACC); }
+:MOVL "@ACC", "XAR2"  is op_hi8=0xAA & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR2; setNZ32(ACC); }
+:MOVL "@ACC", "XAR3"  is op_hi8=0xA2 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR3; setNZ32(ACC); }
+:MOVL "@ACC", "XAR4"  is op_hi8=0xA8 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR4; setNZ32(ACC); }
+:MOVL "@ACC", "XAR5"  is op_hi8=0xA0 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR5; setNZ32(ACC); }
+:MOVL "@ACC", "XAR6"  is op_hi8=0xC2 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR6; setNZ32(ACC); }
+:MOVL "@ACC", "XAR7"  is op_hi8=0xC3 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XAR7; setNZ32(ACC); }
+:MOVL "@ACC", "P"     is op_hi8=0xA9 & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = P;    setNZ32(ACC); }
+:MOVL "@ACC", "XT"    is op_hi8=0xAB & ctx_AMODE=0 & loc_full8=0b10101001  { ACC = XT;   setNZ32(ACC); }
 
 # MOVL loc32, XARn  -- per-register scattered opcodes (NOT a clean bit field).
 # XAR0=3A XAR1=B2 XAR2=AA XAR3=A2 XAR4=A8 XAR5=A0 XAR6=C2 XAR7=C3

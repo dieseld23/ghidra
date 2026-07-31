@@ -2,6 +2,8 @@
 # Included by tms320c28x.sinc. Encodings verified against ch6_instruction_detail.txt.
 #
 # These compute 16x16 -> 32 products into P (and accumulate into ACC). The product
+# is subject to the PM (product shift mode) bits in ST0.  S29b (#114): transfers OUT
+# of P now apply the PM shift via pmShiftedP(); the note below is superseded.
 # is subject to the PM (product shift mode) bits in ST0; for now we model the raw
 # 16x16->32 product WITHOUT the PM shift (PM defaults to >>0 on most code paths).
 # PM-accurate shifting is a deferred refinement -- noted so the approximation is
@@ -74,7 +76,7 @@
 # The second word is the low 16 bits of a program-memory address (0:pma). We model
 # the accumulate of the previous product and the new product load.
 :MAC Preg, loc16, "*"imm16  is op_hi8=0x14 & Preg & loc16 ; imm16  {
-    ACC = ACC + P;
+    local sp:4; pmShiftedP(sp); ACC = ACC + sp;   # S29b (#114): was ACC = ACC + P
     local pma:4 = zext(imm16:2);
     local pv:2 = *[ram]:2 pma;
     local a:4 = sext(loc16);
@@ -83,13 +85,17 @@
 }
 
 # MOVA T,loc16      0001 0000 LLLL LLLL   -- T = loc16; ACC += P (load T, add prev product)
-:MOVA Treg, loc16  is op_hi8=0x10 & Treg & loc16  {
-    ACC = ACC + P;
+# S29a (#114): op_lo8 0xAC is NOT a MOVA encoding -- 0x10AC is `ADDL ACC,P << PM`
+# (SPRU430F opcode table).  Both patterns specify all 16 bits for that word, so it was
+# a tie that MOVA won by declaration order, and a real ADDL decoded as `MOVA T,@TH`.
+# Excluding the one reserved encoding breaks the tie.  MOVA count in this image is 0.
+:MOVA Treg, loc16  is op_hi8=0x10 & op_lo8!=0xAC & Treg & loc16  {
+    local sp:4; pmShiftedP(sp); ACC = ACC + sp;   # S29b (#114): was ACC = ACC + P
     T = loc16;
 }
 
 # MOVP T,loc16      0001 0110 LLLL LLLL   -- T = loc16; ACC = P (load T, move product)
 :MOVP Treg, loc16  is op_hi8=0x16 & Treg & loc16  {
-    ACC = P;
+    local sp:4; pmShiftedP(sp); ACC = sp;   # S29b (#114): was ACC = P
     T = loc16;
 }
