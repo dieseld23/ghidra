@@ -140,6 +140,29 @@ PrintC::PrintC(Architecture *g,const string &nm) : PrintLanguage(g,nm)
 /// Push nested components of a data-type declaration onto a stack, so we can access it bottom up
 /// \param ct is the data-type being emitted
 /// \param typestack will hold the sub-types involved in the displaying the declaration
+/// \brief Determine whether a comparison should be printed with its operands mirrored
+///
+/// True when input0 is a constant and input1 is not.  Both operands constant is left
+/// alone (there is no reader benefit in flipping "1 < 2", and folding it is the
+/// optimizer's job, not the printer's).  A constant already on the right reads naturally.
+///
+/// Background: Ghidra's p-code op set contains only INT_LESS, INT_SLESS, INT_LESSEQUAL,
+/// INT_SLESSEQUAL, FLOAT_LESS and FLOAT_LESSEQUAL -- there is no greater-than opcode.  A
+/// hardware ">=" branch can therefore only be modelled by swapping the operands into a
+/// LESS-form op, and the processor spec has no choice about this.  The C printer then
+/// emitted them in p-code order, producing constant-first "Yoda" comparisons such as
+/// "20.0 <= airflow_feedback" where the source plainly said "airflow_feedback >= 20.0".
+/// \param op is the comparison PcodeOp
+/// \return \b true if the printed form should be mirrored
+bool PrintC::constantFirst(const PcodeOp *op)
+
+{
+  const Varnode *vn0 = op->getIn(0);
+  const Varnode *vn1 = op->getIn(1);
+  if (vn0 == (const Varnode *)0 || vn1 == (const Varnode *)0) return false;
+  return vn0->isConstant() && !vn1->isConstant();
+}
+
 void PrintC::buildTypeStack(const Datatype *ct,vector<const Datatype *> &typestack)
 
 {

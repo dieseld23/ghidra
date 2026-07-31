@@ -563,6 +563,32 @@ void PrintLanguage::opBinary(const OpToken *tok,const PcodeOp *op)
   pushVn(op->getIn(0),op,mods);
 }
 
+/// Push a binary operator onto the stack with its two input expressions
+/// pushed in SWAPPED order, so the printed form reads "in1 tok in0".
+///
+/// The caller is responsible for passing a token whose meaning is already
+/// mirrored -- e.g. calling this with \b greater_than for a CPUI_INT_LESS op,
+/// since "a < b" and "b > a" denote the same comparison.  The p-code is not
+/// modified in any way; this only changes the order the two operand
+/// expressions are emitted in.
+/// \param tok is the (already mirrored) operator token to push
+/// \param op is the associated PcodeOp
+void PrintLanguage::opBinarySwap(const OpToken *tok,const PcodeOp *op)
+
+{
+  if (isSet(negatetoken)) {
+    tok = tok->negate;
+    unsetMod(negatetoken);
+    if (tok == (const OpToken *)0)
+      throw LowlevelError("Could not find fliptoken");
+  }
+  pushOp(tok,op);		// Push on reverse polish notation
+  // implied vn's pushed on in reverse order for efficiency
+  // see PrintLanguage::pushVnImplied  -- note this is the OPPOSITE order to opBinary
+  pushVn(op->getIn(0),op,mods);
+  pushVn(op->getIn(1),op,mods);
+}
+
 /// Push an operator onto the stack that has a normal unary format.
 /// Its input expression is also pushed.
 /// \param tok is the operator token to push

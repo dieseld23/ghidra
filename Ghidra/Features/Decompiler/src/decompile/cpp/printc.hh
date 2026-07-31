@@ -283,12 +283,26 @@ public:
   virtual void opCallother(const PcodeOp *op);
   virtual void opConstructor(const PcodeOp *op,bool withNew);
   virtual void opReturn(const PcodeOp *op);
+  /// \brief Is this comparison written with its constant operand on the LEFT?
+  ///
+  /// Ghidra's p-code op set has no greater-than: CPUI_INT_LESS and friends are the
+  /// only comparison ops, so a hardware ">=" branch can only be represented by
+  /// swapping the operands into a LESS-form op.  The C printer then emits them in
+  /// p-code order and the reader sees "20.0 <= airflow" instead of "airflow >= 20.0".
+  /// When the left operand is a constant and the right is not, the expression is
+  /// almost always more readable mirrored.  Purely presentational -- see opBinarySwap.
+  static bool constantFirst(const PcodeOp *op);
+
   virtual void opIntEqual(const PcodeOp *op) { opBinary(&equal,op); }
   virtual void opIntNotEqual(const PcodeOp *op) { opBinary(&not_equal,op); }
-  virtual void opIntSless(const PcodeOp *op) { opBinary(&less_than,op); }
-  virtual void opIntSlessEqual(const PcodeOp *op) { opBinary(&less_equal,op); }
-  virtual void opIntLess(const PcodeOp *op) { opBinary(&less_than,op); }
-  virtual void opIntLessEqual(const PcodeOp *op) { opBinary(&less_equal,op); }
+  virtual void opIntSless(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_than,op); else opBinary(&less_than,op); }
+  virtual void opIntSlessEqual(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_equal,op); else opBinary(&less_equal,op); }
+  virtual void opIntLess(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_than,op); else opBinary(&less_than,op); }
+  virtual void opIntLessEqual(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_equal,op); else opBinary(&less_equal,op); }
   virtual void opIntZext(const PcodeOp *op,const PcodeOp *readOp);
   virtual void opIntSext(const PcodeOp *op,const PcodeOp *readOp);
   virtual void opIntAdd(const PcodeOp *op) { opBinary(&binary_plus,op); }
@@ -315,8 +329,10 @@ public:
   virtual void opBoolOr(const PcodeOp *op) { opBinary(&boolean_or,op); }
   virtual void opFloatEqual(const PcodeOp *op) { opBinary(&equal,op); }
   virtual void opFloatNotEqual(const PcodeOp *op) { opBinary(&not_equal,op); }
-  virtual void opFloatLess(const PcodeOp *op) { opBinary(&less_than,op); }
-  virtual void opFloatLessEqual(const PcodeOp *op) { opBinary(&less_equal,op); }
+  virtual void opFloatLess(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_than,op); else opBinary(&less_than,op); }
+  virtual void opFloatLessEqual(const PcodeOp *op) {
+    if (constantFirst(op)) opBinarySwap(&greater_equal,op); else opBinary(&less_equal,op); }
   virtual void opFloatNan(const PcodeOp *op) { opFunc(op); }
   virtual void opFloatAdd(const PcodeOp *op) { opBinary(&binary_plus,op); }
   virtual void opFloatDiv(const PcodeOp *op) { opBinary(&divide,op); }

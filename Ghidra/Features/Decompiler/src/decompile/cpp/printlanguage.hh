@@ -302,6 +302,7 @@ protected:
   bool escapeCharacterData(ostream &s,const uint1 *buf,int4 count,int4 charsize,bool bigend) const;
   void recurse(void);							///< Emit from the RPN stack as much as possible
   void opBinary(const OpToken *tok,const PcodeOp *op);			///< Push a binary operator onto the RPN stack
+  void opBinarySwap(const OpToken *tok,const PcodeOp *op);		///< Push a binary operator, operands swapped
   void opUnary(const OpToken *tok,const PcodeOp *op);			///< Push a unary operator onto the RPN stack
   int4 getPending(void) const { return pending; }			///< Get the number of pending nodes yet to be put on the RPN stack
   void resetDefaultsInternal(void);					///< Reset options to default for PrintLanguage
